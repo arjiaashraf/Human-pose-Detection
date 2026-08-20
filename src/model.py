@@ -2,13 +2,13 @@ import torch
 import torch.nn as nn
 
 
-# ============================================================
-# Double Convolution Block
-# ============================================================
-
 class DoubleConv(nn.Module):
 
-    def __init__(self, in_channels, out_channels):
+    def __init__(
+        self,
+        in_channels,
+        out_channels
+    ):
         super().__init__()
 
         self.block = nn.Sequential(
@@ -42,10 +42,6 @@ class DoubleConv(nn.Module):
         return self.block(x)
 
 
-# ============================================================
-# UNetPose
-# ============================================================
-
 class UNetPose(nn.Module):
 
     def __init__(
@@ -55,9 +51,9 @@ class UNetPose(nn.Module):
     ):
         super().__init__()
 
-        # ====================================================
+        # ----------------------------------------------------
         # Encoder
-        # ====================================================
+        # ----------------------------------------------------
 
         self.enc1 = DoubleConv(
             in_channels,
@@ -80,22 +76,22 @@ class UNetPose(nn.Module):
         )
 
         self.pool = nn.MaxPool2d(
-            kernel_size=2,
-            stride=2
+            2,
+            2
         )
 
-        # ====================================================
+        # ----------------------------------------------------
         # Bottleneck
-        # ====================================================
+        # ----------------------------------------------------
 
         self.bottleneck = DoubleConv(
             256,
             256
         )
 
-        # ====================================================
+        # ----------------------------------------------------
         # Decoder
-        # ====================================================
+        # ----------------------------------------------------
 
         self.up4 = nn.ConvTranspose2d(
             256,
@@ -104,7 +100,6 @@ class UNetPose(nn.Module):
             stride=2
         )
 
-        # 128 from up4 + 256 from e4 = 384
         self.dec4 = DoubleConv(
             384,
             128
@@ -117,25 +112,20 @@ class UNetPose(nn.Module):
             stride=2
         )
 
-        # 64 from up3 + 128 from e3 = 192
         self.dec3 = DoubleConv(
             192,
             64
         )
 
-        # ====================================================
-        # Heatmap Head
-        # ====================================================
+        # ----------------------------------------------------
+        # Heads
+        # ----------------------------------------------------
 
         self.heatmap_head = nn.Conv2d(
             64,
             num_keypoints,
             kernel_size=1
         )
-
-        # ====================================================
-        # Visibility Head
-        # ====================================================
 
         self.visibility_head = nn.Sequential(
 
@@ -145,83 +135,83 @@ class UNetPose(nn.Module):
 
             nn.Linear(
                 64,
+                32
+            ),
+
+            nn.ReLU(inplace=True),
+
+            nn.Linear(
+                32,
                 num_keypoints
             )
         )
 
-    # ========================================================
-    # Forward
-    # ========================================================
+        # ----------------------------------------------------
+        # Initialize heatmap head
+        # ----------------------------------------------------
+
+        nn.init.normal_(
+            self.heatmap_head.weight,
+            mean=0.0,
+            std=0.001
+        )
+
+        nn.init.constant_(
+            self.heatmap_head.bias,
+            -2.0
+        )
 
     def forward(self, x):
 
-        # ====================================================
         # Encoder
-        # ====================================================
 
         e1 = self.enc1(x)
-        # [B, 32, 256, 256]
 
         e2 = self.enc2(
             self.pool(e1)
         )
-        # [B, 64, 128, 128]
 
         e3 = self.enc3(
             self.pool(e2)
         )
-        # [B, 128, 64, 64]
 
         e4 = self.enc4(
             self.pool(e3)
         )
-        # [B, 256, 32, 32]
 
-        # ====================================================
         # Bottleneck
-        # ====================================================
 
         b = self.bottleneck(
             self.pool(e4)
         )
-        # [B, 256, 16, 16]
 
-        # ====================================================
         # Decoder
-        # ====================================================
 
         d4 = self.up4(b)
-        # [B, 128, 32, 32]
 
         d4 = torch.cat(
             [d4, e4],
             dim=1
         )
-        # [B, 384, 32, 32]
 
         d4 = self.dec4(d4)
-        # [B, 128, 32, 32]
 
         d3 = self.up3(d4)
-        # [B, 64, 64, 64]
 
         d3 = torch.cat(
             [d3, e3],
             dim=1
         )
-        # [B, 192, 64, 64]
 
         d3 = self.dec3(d3)
-        # [B, 64, 64, 64]
 
-        # ====================================================
-        # Output Heads
-        # ====================================================
+        # Outputs
 
         heatmaps = self.heatmap_head(d3)
-        # [B, 17, 64, 64]
 
         visibility = self.visibility_head(d3)
-        # [B, 17]
 
-        return heatmaps, visibility
+        return (
+            heatmaps,
+            visibility
+        )
