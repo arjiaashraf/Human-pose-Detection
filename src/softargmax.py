@@ -12,70 +12,63 @@ class SoftArgmax2D(nn.Module):
 
     def forward(self, heatmaps):
 
-        # heatmaps:
-        # [B, K, H, W]
-
         B, K, H, W = heatmaps.shape
 
-        # Flatten spatial dimensions
-        heatmaps = heatmaps.view(
+        # ----------------------------------------------------
+        # Flatten
+        # ----------------------------------------------------
+
+        flat = heatmaps.reshape(
             B,
             K,
-            -1
+            H * W
         )
 
-        # Convert heatmap values into probabilities
+        # ----------------------------------------------------
+        # Spatial probability
+        # ----------------------------------------------------
+
         probabilities = F.softmax(
-            heatmaps * self.beta,
+            flat * self.beta,
             dim=-1
         )
 
         # ----------------------------------------------------
-        # X coordinates
+        # Coordinate grid
         # ----------------------------------------------------
 
-        x_coords = torch.linspace(
-            0,
-            W - 1,
-            W,
-            device=heatmaps.device
-        )
-
-        y_coords = torch.linspace(
-            0,
-            H - 1,
-            H,
-            device=heatmaps.device
-        )
-
-        # Create coordinate grid
-        yy, xx = torch.meshgrid(
-            y_coords,
-            x_coords,
+        y_grid, x_grid = torch.meshgrid(
+            torch.arange(
+                H,
+                device=heatmaps.device,
+                dtype=heatmaps.dtype
+            ),
+            torch.arange(
+                W,
+                device=heatmaps.device,
+                dtype=heatmaps.dtype
+            ),
             indexing="ij"
         )
 
-        xx = xx.reshape(-1)
-        yy = yy.reshape(-1)
+        x_grid = x_grid.reshape(-1)
+        y_grid = y_grid.reshape(-1)
 
         # ----------------------------------------------------
-        # Expected coordinates
+        # Expected coordinate
         # ----------------------------------------------------
 
         x = torch.sum(
-            probabilities * xx,
+            probabilities * x_grid,
             dim=-1
         )
 
         y = torch.sum(
-            probabilities * yy,
+            probabilities * y_grid,
             dim=-1
         )
 
-        # [B, K, 2]
-        coordinates = torch.stack(
+        return torch.stack(
             [x, y],
             dim=-1
         )
-
-        return coordinates
