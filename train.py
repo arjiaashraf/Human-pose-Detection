@@ -4,19 +4,14 @@ import random
 import numpy as np
 import torch
 import torch.nn as nn
-
-from torch.utils.data import (
-    DataLoader,
-    random_split,
-    Subset
-)
+from torch.utils.data import DataLoader, random_split, Subset
 
 from src.dataset import COCOKeypointDataset
 from src.model import UNetPose
 
 
 # ============================================================
-# Configuration
+# CONFIGURATION - EXPERIMENT 3
 # ============================================================
 
 IMAGE_DIR = (
@@ -28,29 +23,45 @@ ANNOTATION_FILE = (
     r"\person_keypoints_train2017.json"
 )
 
-# ------------------------------------------------------------
-# Experiment 2
-# ------------------------------------------------------------
+CHECKPOINT_DIR = (
+    r"checkpoints\experiment3"
+)
+
+BEST_MODEL_PATH = os.path.join(
+    CHECKPOINT_DIR,
+    "best_unet_pose.pth"
+)
+
+FINAL_MODEL_PATH = os.path.join(
+    CHECKPOINT_DIR,
+    "unet_pose_final.pth"
+)
+
+IMAGE_SIZE = 256
+HEATMAP_SIZE = 64
+NUM_KEYPOINTS = 17
 
 MAX_SAMPLES = 2000
 
 BATCH_SIZE = 4
 
-EPOCHS = 5
+EPOCHS = 20
 
-LEARNING_RATE = 1e-3
+LEARNING_RATE = 0.0001
 
-IMAGE_SIZE = 256
+TRAIN_RATIO = 0.80
 
-HEATMAP_SIZE = 64
+SIGMA = 2.5
 
-TRAIN_RATIO = 0.8
+# Loss weights
+HEATMAP_WEIGHT = 10.0
+VISIBILITY_WEIGHT = 0.5
 
-SEED = 42
+RANDOM_SEED = 42
 
 
 # ============================================================
-# Device
+# DEVICE
 # ============================================================
 
 DEVICE = torch.device(
@@ -61,63 +72,133 @@ DEVICE = torch.device(
 
 
 # ============================================================
-# Reproducibility
+# REPRODUCIBILITY
 # ============================================================
 
-def set_seed(seed):
+random.seed(RANDOM_SEED)
+np.random.seed(RANDOM_SEED)
+torch.manual_seed(RANDOM_SEED)
 
-    random.seed(seed)
-
-    np.random.seed(seed)
-
-    torch.manual_seed(seed)
-
-    if torch.cuda.is_available():
-        torch.cuda.manual_seed_all(seed)
+if torch.cuda.is_available():
+    torch.cuda.manual_seed_all(RANDOM_SEED)
 
 
 # ============================================================
-# Main
+# HEATMAP LOSS
+# ============================================================
+
+def heatmap_loss(
+    predicted,
+    target,
+    visibility
+):
+    """
+    Weighted MSE.
+
+    Visible keypoints receive full weight.
+    Invisible/unlabeled keypoints are ignored.
+    """
+
+    # [B, K, H, W]
+    joint_visibility = visibility.unsqueeze(
+        -1
+    ).unsqueeze(
+        -1
+    )
+
+    squared_error = (
+        predicted - target
+    ) ** 2
+
+    # Ignore unlabeled joints
+    weighted_error = (
+        squared_error * joint_visibility
+    )
+
+    denominator = (
+        joint_visibility.sum()
+        * predicted.shape[-1]
+        * predicted.shape[-2]
+    )
+
+    denominator = torch.clamp(
+        denominator,
+        min=1.0
+    )
+
+    return weighted_error.sum() / denominator
+
+
+# ============================================================
+# VISIBILITY LOSS
+# ============================================================
+
+visibility_criterion = nn.BCEWithLogitsLoss()
+
+
+# ============================================================
+# MAIN
 # ============================================================
 
 def main():
 
-    set_seed(SEED)
-
     print("=" * 70)
-    print("COCO HUMAN POSE TRAINING - EXPERIMENT 2")
+    print("COCO HUMAN POSE TRAINING - EXPERIMENT 3")
     print("=" * 70)
 
-    print(f"\nDevice: {DEVICE}")
+    print("\nDevice:", DEVICE)
 
     if DEVICE.type == "cuda":
-
         print(
             "GPU:",
             torch.cuda.get_device_name(0)
         )
-
     else:
-
         print(
             "WARNING: Training on CPU."
         )
 
     print("\nConfiguration:")
     print(
-        f"Maximum samples: {MAX_SAMPLES}"
+        "Maximum samples:",
+        MAX_SAMPLES
     )
     print(
-        f"Batch size: {BATCH_SIZE}"
+        "Batch size:",
+        BATCH_SIZE
     )
     print(
-        f"Epochs: {EPOCHS}"
+        "Epochs:",
+        EPOCHS
     )
     print(
-        f"Learning rate: {LEARNING_RATE}"
+        "Learning rate:",
+        LEARNING_RATE
     )
     print(
-        f"Random seed: {SEED}"
+        "Heatmap weight:",
+        HEATMAP_WEIGHT
+    )
+    print(
+        "Visibility weight:",
+        VISIBILITY_WEIGHT
+    )
+    print(
+        "Heatmap sigma:",
+        SIGMA
+    )
+    print(
+        "Random seed:",
+        RANDOM_SEED
+    )
+
+    # ========================================================
+    # Checkpoint directory
+    # ========================================================
+
+    os.makedirs(
+        CHECKPOINT_DIR,
+        exist_ok=True
     )
 
     # ========================================================
@@ -131,17 +212,13 @@ def main():
         annotation_file=ANNOTATION_FILE,
         image_size=IMAGE_SIZE,
         heatmap_size=HEATMAP_SIZE,
-        sigma=2.0
+        sigma=SIGMA
     )
 
     print(
         "Full dataset size:",
         len(dataset)
     )
-
-    # ========================================================
-    # Subset
-    # ========================================================
 
     if MAX_SAMPLES is not None:
 
@@ -161,7 +238,7 @@ def main():
         )
 
     # ========================================================
-    # Train / Validation split
+    # Train / validation split
     # ========================================================
 
     train_size = int(
@@ -175,12 +252,16 @@ def main():
 
     generator = torch.Generator()
 
-    generator.manual_seed(SEED)
+    generator.manual_seed(
+        RANDOM_SEED
+    )
 
-    train_dataset, val_dataset = random_split(
-        dataset,
-        [train_size, val_size],
-        generator=generator
+    train_dataset, val_dataset = (
+        random_split(
+            dataset,
+            [train_size, val_size],
+            generator=generator
+        )
     )
 
     print(
@@ -194,7 +275,7 @@ def main():
     )
 
     # ========================================================
-    # DataLoaders
+    # DataLoader
     # ========================================================
 
     train_loader = DataLoader(
@@ -229,21 +310,13 @@ def main():
 
     model = UNetPose(
         in_channels=3,
-        num_keypoints=17
-    ).to(DEVICE)
+        num_keypoints=NUM_KEYPOINTS
+    )
+
+    model = model.to(DEVICE)
 
     print(
         "Model created successfully."
-    )
-
-    # ========================================================
-    # Loss functions
-    # ========================================================
-
-    heatmap_loss_fn = nn.MSELoss()
-
-    visibility_loss_fn = (
-        nn.BCEWithLogitsLoss()
     )
 
     # ========================================================
@@ -256,24 +329,14 @@ def main():
     )
 
     # ========================================================
-    # Checkpoint directory
+    # Learning rate scheduler
     # ========================================================
 
-    checkpoint_dir = "checkpoints"
-
-    os.makedirs(
-        checkpoint_dir,
-        exist_ok=True
-    )
-
-    best_model_path = os.path.join(
-        checkpoint_dir,
-        "best_unet_pose.pth"
-    )
-
-    final_model_path = os.path.join(
-        checkpoint_dir,
-        "unet_pose_final.pth"
+    scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
+        optimizer,
+        mode="min",
+        factor=0.5,
+        patience=3
     )
 
     # ========================================================
@@ -283,28 +346,27 @@ def main():
     best_val_loss = float("inf")
 
     # ========================================================
-    # Training
+    # TRAINING
     # ========================================================
 
     print("\nStarting training...")
+
     print("=" * 70)
 
-    for epoch in range(EPOCHS):
+    for epoch in range(1, EPOCHS + 1):
 
         # ====================================================
-        # TRAINING
+        # TRAIN
         # ====================================================
 
         model.train()
 
-        running_train_loss = 0.0
-
-        running_train_heatmap = 0.0
-
-        running_train_visibility = 0.0
+        running_total = 0.0
+        running_heatmap = 0.0
+        running_visibility = 0.0
 
         print(
-            f"\nEpoch [{epoch + 1}/{EPOCHS}]"
+            f"\nEpoch [{epoch}/{EPOCHS}]"
         )
 
         print("-" * 70)
@@ -314,10 +376,6 @@ def main():
             target_heatmaps,
             visibility
         ) in enumerate(train_loader):
-
-            # ------------------------------------------------
-            # Move to device
-            # ------------------------------------------------
 
             images = images.to(DEVICE)
 
@@ -333,62 +391,29 @@ def main():
             # Forward
             # ------------------------------------------------
 
-            heatmap_output, visibility_output = (
+            predicted_heatmaps, predicted_visibility = (
                 model(images)
             )
 
             # ------------------------------------------------
-            # Shape checks
+            # Losses
             # ------------------------------------------------
 
-            expected_heatmap_shape = (
-                images.shape[0],
-                17,
-                HEATMAP_SIZE,
-                HEATMAP_SIZE
+            hm_loss = heatmap_loss(
+                predicted_heatmaps,
+                target_heatmaps,
+                visibility
             )
 
-            expected_visibility_shape = (
-                images.shape[0],
-                17
-            )
-
-            if heatmap_output.shape != (
-                expected_heatmap_shape
-            ):
-
-                raise RuntimeError(
-                    "Incorrect heatmap output shape: "
-                    f"{heatmap_output.shape}"
-                )
-
-            if visibility_output.shape != (
-                expected_visibility_shape
-            ):
-
-                raise RuntimeError(
-                    "Incorrect visibility output shape: "
-                    f"{visibility_output.shape}"
-                )
-
-            # ------------------------------------------------
-            # Loss
-            # ------------------------------------------------
-
-            heatmap_loss = heatmap_loss_fn(
-                heatmap_output,
-                target_heatmaps
-            )
-
-            visibility_loss = visibility_loss_fn(
-                visibility_output,
+            vis_loss = visibility_criterion(
+                predicted_visibility,
                 visibility
             )
 
             total_loss = (
-                heatmap_loss
+                HEATMAP_WEIGHT * hm_loss
                 +
-                visibility_loss
+                VISIBILITY_WEIGHT * vis_loss
             )
 
             # ------------------------------------------------
@@ -399,22 +424,28 @@ def main():
 
             total_loss.backward()
 
+            # Gradient clipping
+            torch.nn.utils.clip_grad_norm_(
+                model.parameters(),
+                max_norm=5.0
+            )
+
             optimizer.step()
 
             # ------------------------------------------------
-            # Accumulate
+            # Statistics
             # ------------------------------------------------
 
-            running_train_loss += (
+            running_total += (
                 total_loss.item()
             )
 
-            running_train_heatmap += (
-                heatmap_loss.item()
+            running_heatmap += (
+                hm_loss.item()
             )
 
-            running_train_visibility += (
-                visibility_loss.item()
+            running_visibility += (
+                vis_loss.item()
             )
 
             # ------------------------------------------------
@@ -427,38 +458,32 @@ def main():
 
                 print(
                     f"Train Batch "
-                    f"[{batch_idx + 1}/"
-                    f"{len(train_loader)}] "
-                    f"Loss: "
-                    f"{total_loss.item():.4f} | "
-                    f"Heatmap: "
-                    f"{heatmap_loss.item():.4f} | "
-                    f"Visibility: "
-                    f"{visibility_loss.item():.4f}"
+                    f"[{batch_idx + 1}/{len(train_loader)}] "
+                    f"Loss: {total_loss.item():.4f} | "
+                    f"Heatmap: {hm_loss.item():.4f} | "
+                    f"Visibility: {vis_loss.item():.4f}"
                 )
 
         # ====================================================
         # Average training losses
         # ====================================================
 
-        train_batches = len(train_loader)
-
-        avg_train_loss = (
-            running_train_loss
+        train_total = (
+            running_total
             /
-            train_batches
+            len(train_loader)
         )
 
-        avg_train_heatmap = (
-            running_train_heatmap
+        train_heatmap = (
+            running_heatmap
             /
-            train_batches
+            len(train_loader)
         )
 
-        avg_train_visibility = (
-            running_train_visibility
+        train_visibility = (
+            running_visibility
             /
-            train_batches
+            len(train_loader)
         )
 
         # ====================================================
@@ -467,19 +492,13 @@ def main():
 
         model.eval()
 
-        running_val_loss = 0.0
-
-        running_val_heatmap = 0.0
-
-        running_val_visibility = 0.0
+        val_total_sum = 0.0
+        val_heatmap_sum = 0.0
+        val_visibility_sum = 0.0
 
         with torch.no_grad():
 
-            for (
-                images,
-                target_heatmaps,
-                visibility
-            ) in val_loader:
+            for images, target_heatmaps, visibility in val_loader:
 
                 images = images.to(DEVICE)
 
@@ -491,144 +510,152 @@ def main():
                     visibility.to(DEVICE)
                 )
 
-                # --------------------------------------------
-                # Forward
-                # --------------------------------------------
-
-                heatmap_output, visibility_output = (
+                predicted_heatmaps, predicted_visibility = (
                     model(images)
                 )
 
-                # --------------------------------------------
-                # Validation loss
-                # --------------------------------------------
-
-                heatmap_loss = heatmap_loss_fn(
-                    heatmap_output,
-                    target_heatmaps
+                hm_loss = heatmap_loss(
+                    predicted_heatmaps,
+                    target_heatmaps,
+                    visibility
                 )
 
-                visibility_loss = visibility_loss_fn(
-                    visibility_output,
+                vis_loss = visibility_criterion(
+                    predicted_visibility,
                     visibility
                 )
 
                 total_loss = (
-                    heatmap_loss
+                    HEATMAP_WEIGHT * hm_loss
                     +
-                    visibility_loss
+                    VISIBILITY_WEIGHT * vis_loss
                 )
 
-                # --------------------------------------------
-                # Accumulate
-                # --------------------------------------------
-
-                running_val_loss += (
+                val_total_sum += (
                     total_loss.item()
                 )
 
-                running_val_heatmap += (
-                    heatmap_loss.item()
+                val_heatmap_sum += (
+                    hm_loss.item()
                 )
 
-                running_val_visibility += (
-                    visibility_loss.item()
+                val_visibility_sum += (
+                    vis_loss.item()
                 )
 
-        # ====================================================
-        # Average validation losses
-        # ====================================================
-
-        val_batches = len(val_loader)
-
-        avg_val_loss = (
-            running_val_loss
+        val_total = (
+            val_total_sum
             /
-            val_batches
+            len(val_loader)
         )
 
-        avg_val_heatmap = (
-            running_val_heatmap
+        val_heatmap = (
+            val_heatmap_sum
             /
-            val_batches
+            len(val_loader)
         )
 
-        avg_val_visibility = (
-            running_val_visibility
+        val_visibility = (
+            val_visibility_sum
             /
-            val_batches
+            len(val_loader)
         )
 
         # ====================================================
-        # Epoch results
+        # Scheduler
         # ====================================================
 
-        print("\n" + "=" * 70)
+        scheduler.step(
+            val_total
+        )
+
+        current_lr = optimizer.param_groups[0]["lr"]
+
+        # ====================================================
+        # RESULTS
+        # ====================================================
+
+        print("\n")
+
+        print("=" * 70)
 
         print(
-            f"EPOCH {epoch + 1}/{EPOCHS} RESULTS"
+            f"EPOCH {epoch}/{EPOCHS} RESULTS"
         )
 
         print("=" * 70)
 
         print(
             f"Training Total Loss: "
-            f"{avg_train_loss:.4f}"
+            f"{train_total:.6f}"
         )
 
         print(
-            f"Training Heatmap MSE: "
-            f"{avg_train_heatmap:.4f}"
+            f"Training Heatmap Loss: "
+            f"{train_heatmap:.6f}"
         )
 
         print(
             f"Training Visibility BCE: "
-            f"{avg_train_visibility:.4f}"
+            f"{train_visibility:.6f}"
         )
 
         print()
 
         print(
             f"Validation Total Loss: "
-            f"{avg_val_loss:.4f}"
+            f"{val_total:.6f}"
         )
 
         print(
-            f"Validation Heatmap MSE: "
-            f"{avg_val_heatmap:.4f}"
+            f"Validation Heatmap Loss: "
+            f"{val_heatmap:.6f}"
         )
 
         print(
             f"Validation Visibility BCE: "
-            f"{avg_val_visibility:.4f}"
+            f"{val_visibility:.6f}"
+        )
+
+        print()
+
+        print(
+            f"Learning rate: "
+            f"{current_lr:.8f}"
         )
 
         # ====================================================
-        # Best model
+        # Save best model
         # ====================================================
 
-        if avg_val_loss < best_val_loss:
+        if val_total < best_val_loss:
 
-            best_val_loss = avg_val_loss
+            best_val_loss = val_total
+
+            checkpoint = {
+                "epoch": epoch,
+                "model_state_dict": model.state_dict(),
+                "optimizer_state_dict": optimizer.state_dict(),
+                "val_loss": val_total,
+                "train_loss": train_total,
+                "val_heatmap_loss": val_heatmap,
+                "val_visibility_loss": val_visibility,
+            }
 
             torch.save(
-                {
-                    "epoch": epoch + 1,
-                    "model_state_dict": model.state_dict(),
-                    "optimizer_state_dict": optimizer.state_dict(),
-                    "val_loss": avg_val_loss,
-                    "train_loss": avg_train_loss,
-                },
-                best_model_path
+                checkpoint,
+                BEST_MODEL_PATH
             )
 
-            print("\n*** NEW BEST MODEL SAVED ***")
+            print()
+
+            print(
+                "*** NEW BEST MODEL SAVED ***"
+            )
 
             print(
                 "Path:",
-                os.path.abspath(
-                    best_model_path
-                )
+                BEST_MODEL_PATH
             )
 
         else:
@@ -636,8 +663,6 @@ def main():
             print(
                 "\nNo improvement in validation loss."
             )
-
-        print("=" * 70)
 
     # ========================================================
     # Save final model
@@ -648,43 +673,44 @@ def main():
             "epoch": EPOCHS,
             "model_state_dict": model.state_dict(),
             "optimizer_state_dict": optimizer.state_dict(),
-            "val_loss": avg_val_loss,
-            "train_loss": avg_train_loss,
+            "val_loss": val_total,
+            "train_loss": train_total,
         },
-        final_model_path
+        FINAL_MODEL_PATH
     )
 
     # ========================================================
-    # Finished
+    # COMPLETE
     # ========================================================
 
     print("\n")
-    print("=" * 70)
-    print("TRAINING COMPLETED")
+
     print("=" * 70)
 
     print(
-        "\nBest validation loss:",
-        f"{best_val_loss:.4f}"
+        "EXPERIMENT 3 TRAINING COMPLETED"
     )
 
+    print("=" * 70)
+
     print(
-        "\nBest model:"
+        f"\nBest validation loss: "
+        f"{best_val_loss:.6f}"
     )
+
+    print("\nBest model:")
 
     print(
         os.path.abspath(
-            best_model_path
+            BEST_MODEL_PATH
         )
     )
 
-    print(
-        "\nFinal model:"
-    )
+    print("\nFinal model:")
 
     print(
         os.path.abspath(
-            final_model_path
+            FINAL_MODEL_PATH
         )
     )
 
@@ -692,7 +718,7 @@ def main():
 
 
 # ============================================================
-# Run
+# RUN
 # ============================================================
 
 if __name__ == "__main__":
