@@ -1,5 +1,6 @@
 import json
 import os
+
 import cv2
 import numpy as np
 import torch
@@ -15,77 +16,84 @@ class COCOKeypointDataset(Dataset):
         image_size=256,
         heatmap_size=64,
         sigma=2.0,
+        padding=0.20,
     ):
-
         self.image_dir = image_dir
         self.image_size = image_size
         self.heatmap_size = heatmap_size
         self.sigma = sigma
+        self.padding = padding
 
-        # --------------------------------------------------
+        # ----------------------------------------------------
         # Load COCO annotations
-        # --------------------------------------------------
+        # ----------------------------------------------------
 
         with open(annotation_file, "r", encoding="utf-8") as f:
             coco = json.load(f)
 
-        # Map image ID -> image information
         self.images = {
             img["id"]: img
             for img in coco["images"]
         }
 
-        # --------------------------------------------------
-        # Find images that actually exist on disk
-        # --------------------------------------------------
-
-        available_images = set(
-            os.listdir(self.image_dir)
-        )
-
-        print("Images found on disk:", len(available_images))
-
-        # --------------------------------------------------
-        # Keep only usable annotations
-        # --------------------------------------------------
+        # ----------------------------------------------------
+        # Keep annotations containing keypoints
+        # ----------------------------------------------------
 
         self.annotations = []
 
         for ann in coco["annotations"]:
 
-            # Must contain at least one keypoint
-            if ann["num_keypoints"] <= 0:
+            if ann.get("num_keypoints", 0) <= 0:
+                continue
+
+            if ann.get("category_id") != 1:
                 continue
 
             image_id = ann["image_id"]
 
-            # Get image information
             if image_id not in self.images:
-                continue
-
-            filename = self.images[image_id]["file_name"]
-
-            # Check whether image exists
-            if filename not in available_images:
                 continue
 
             self.annotations.append(ann)
 
+        # ----------------------------------------------------
+        # Keep only annotations whose images exist
+        # ----------------------------------------------------
+
+        usable_annotations = []
+
+        for ann in self.annotations:
+
+            image_info = self.images[ann["image_id"]]
+
+            filename = image_info["file_name"]
+
+            image_path = os.path.join(
+                self.image_dir,
+                filename
+            )
+
+            if os.path.exists(image_path):
+                usable_annotations.append(ann)
+
+        self.annotations = usable_annotations
+
         print(
-            "Usable annotations with downloaded images:",
+            "Usable person annotations:",
             len(self.annotations)
         )
 
-    # --------------------------------------------------
+    # ========================================================
     # Dataset length
-    # --------------------------------------------------
+    # ========================================================
 
     def __len__(self):
         return len(self.annotations)
 
-    # --------------------------------------------------
-    # Get one sample
-    # --------------------------------------------------
+    # ========================================================
+    # Get sample
+    # ========================================================
 
     def __getitem__(self, idx):
 
@@ -102,9 +110,9 @@ class COCOKeypointDataset(Dataset):
             filename
         )
 
-        # --------------------------------------------------
+        # ----------------------------------------------------
         # Load image
-        # --------------------------------------------------
+        # ----------------------------------------------------
 
         image = cv2.imread(image_path)
 
@@ -113,7 +121,6 @@ class COCOKeypointDataset(Dataset):
                 f"Could not load image: {image_path}"
             )
 
-        # BGR -> RGB
         image = cv2.cvtColor(
             image,
             cv2.COLOR_BGR2RGB
@@ -121,61 +128,142 @@ class COCOKeypointDataset(Dataset):
 
         original_h, original_w = image.shape[:2]
 
-        # --------------------------------------------------
-        # Resize image
-        # --------------------------------------------------
+        # ----------------------------------------------------
+        # Read bounding box
+        #
+        # COCO format:
+        # [x, y, width, height]
+        # ----------------------------------------------------
 
-        image = cv2.resize(
-            image,
-            (self.image_size, self.image_size)
-        )
+        x, y, w, h = ann["bbox"]
 
-        # Normalize
-        image = image.astype(
-            np.float32
-        ) / 255.0
+        x1 = float(x)
+        y1 = float(y)
+        x2 = float(x + w)
+        y2 = float(y + h)
 
-        # HWC -> CHW
-        image = np.transpose(
-            image,
-            (2, 0, 1)
-        )
+        # ----------------------------------------------------
+        # Add padding around person
+        # ----------------------------------------------------
 
-        image = torch.tensor(
-            image,
-            dtype=torch.float32
-        )
+        pad_x = w * self.padding
+        pad_y = h * self.padding
 
-        # --------------------------------------------------
+        x1 -= pad_x
+        y1 -= pad_y
+        x2 += pad_x
+        y2 += pad_y
+
+        # Clamp to image boundaries
+
+        x1 = max(0, x1)
+        y1 = max(0, y1)
+
+        x2 = min(original_w, x2)
+        y2 = min(original_h, y2)
+
+        # Make integer crop coordinates
+
+        x1_int = int(round(x1))
+        y1_int = int(round(y1))
+        x2_int = int(round(x2))
+        y2_int = int(round(y2))
+
+        # ----------------------------------------------------
+        # Crop person
+        # ----------------------------------------------------
+
+        crop = image[
+            y1_int:y2_int,
+            x1_int:x2_int
+        ]
+
+        if crop.size == 0:
+            raise RuntimeError(
+                f"Empty crop for annotation {idx}"
+            )
+
+        crop_h, crop_w = crop.shape[:2]
+
+        # ----------------------------------------------------
         # COCO keypoints
-        # --------------------------------------------------
+        # ----------------------------------------------------
 
         keypoints = np.array(
             ann["keypoints"],
             dtype=np.float32
         ).reshape(17, 3)
 
-        # --------------------------------------------------
-        # Scale coordinates
-        # --------------------------------------------------
+        # ----------------------------------------------------
+        # Convert image coordinates
+        # to crop coordinates
+        # ----------------------------------------------------
 
-        scale_x = self.image_size / original_w
-        scale_y = self.image_size / original_h
+        keypoints[:, 0] -= x1_int
+        keypoints[:, 1] -= y1_int
+
+        # ----------------------------------------------------
+        # Resize crop
+        # ----------------------------------------------------
+
+        crop = cv2.resize(
+            crop,
+            (
+                self.image_size,
+                self.image_size
+            ),
+            interpolation=cv2.INTER_LINEAR
+        )
+
+        # ----------------------------------------------------
+        # Scale keypoints
+        # ----------------------------------------------------
+
+        scale_x = self.image_size / crop_w
+        scale_y = self.image_size / crop_h
 
         keypoints[:, 0] *= scale_x
         keypoints[:, 1] *= scale_y
 
-        # --------------------------------------------------
-        # Generate Gaussian heatmaps
-        # --------------------------------------------------
+        # ----------------------------------------------------
+        # Normalize image
+        # ----------------------------------------------------
+
+        crop = crop.astype(
+            np.float32
+        ) / 255.0
+
+        # HWC → CHW
+
+        crop = np.transpose(
+            crop,
+            (2, 0, 1)
+        )
+
+        image_tensor = torch.tensor(
+            crop,
+            dtype=torch.float32
+        )
+
+        # ----------------------------------------------------
+        # Generate heatmaps
+        # ----------------------------------------------------
 
         heatmaps = self.generate_heatmaps(
             keypoints
         )
 
-        # --------------------------------------------------
+        # ----------------------------------------------------
         # Visibility
-        # --------------------------------------------------
+        #
+        # COCO:
+        # 0 = not labeled
+        # 1 = labeled but not visible
+        # 2 = visible
+        #
+        # For training:
+        # > 0 means keypoint has annotation
+        # ----------------------------------------------------
 
         visibility = (
             keypoints[:, 2] > 0
@@ -186,11 +274,15 @@ class COCOKeypointDataset(Dataset):
             dtype=torch.float32
         )
 
-        return image, heatmaps, visibility
+        return (
+            image_tensor,
+            heatmaps,
+            visibility
+        )
 
-    # --------------------------------------------------
-    # Gaussian heatmap generation
-    # --------------------------------------------------
+    # ========================================================
+    # Generate Gaussian heatmaps
+    # ========================================================
 
     def generate_heatmaps(self, keypoints):
 
@@ -204,11 +296,12 @@ class COCOKeypointDataset(Dataset):
         )
 
         scale = (
-            self.heatmap_size /
-            self.image_size
+            self.heatmap_size
+            / self.image_size
         )
 
-        # Create grid once
+        # Coordinate grid
+
         xx, yy = np.meshgrid(
             np.arange(self.heatmap_size),
             np.arange(self.heatmap_size)
@@ -221,19 +314,21 @@ class COCOKeypointDataset(Dataset):
             if visible == 0:
                 continue
 
-            # Convert image coordinates
-            # to heatmap coordinates
-            x_h = x * scale
-            y_h = y * scale
+            # Convert to heatmap coordinates
 
-            # Gaussian
+            hx = x * scale
+            hy = y * scale
+
+            # Gaussian heatmap
+
             heatmap = np.exp(
                 -(
-                    (xx - x_h) ** 2 +
-                    (yy - y_h) ** 2
+                    (xx - hx) ** 2
+                    + (yy - hy) ** 2
                 )
-                /
-                (2 * self.sigma ** 2)
+                / (
+                    2 * self.sigma ** 2
+                )
             )
 
             heatmaps[joint_id] = heatmap
