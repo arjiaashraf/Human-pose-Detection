@@ -1,297 +1,554 @@
+# ============================================================
+# COCO HUMAN POSE TRAINING - EXPERIMENT 11
+# ============================================================
+
 import os
-import random
+import json
 
-import numpy as np
 import torch
-import torch.nn as nn
-from torch.utils.data import DataLoader, random_split, Subset
 
-from src.dataset import COCOKeypointDataset
+from torch.utils.data import DataLoader
+
+from src.config import *
+
+from src.utils import (
+    seed_everything,
+    ensure_dirs,
+    get_device,
+    create_scaler,
+    autocast_context,
+)
+
+from src.dataset import (
+    COCOPoseDataset,
+    load_coco_records,
+    split_records,
+)
+
 from src.model import UNetPose
 
-
-# ============================================================
-# CONFIGURATION - EXPERIMENT 3
-# ============================================================
-
-IMAGE_DIR = (
-    r"C:\Users\Computer House\fiftyone\coco-2017\train\data"
-)
-
-ANNOTATION_FILE = (
-    r"C:\Users\Computer House\fiftyone\coco-2017\raw"
-    r"\person_keypoints_train2017.json"
-)
-
-CHECKPOINT_DIR = (
-    r"checkpoints\experiment3"
-)
-
-BEST_MODEL_PATH = os.path.join(
-    CHECKPOINT_DIR,
-    "best_unet_pose.pth"
-)
-
-FINAL_MODEL_PATH = os.path.join(
-    CHECKPOINT_DIR,
-    "unet_pose_final.pth"
-)
-
-IMAGE_SIZE = 256
-HEATMAP_SIZE = 64
-NUM_KEYPOINTS = 17
-
-MAX_SAMPLES = 2000
-
-BATCH_SIZE = 4
-
-EPOCHS = 20
-
-LEARNING_RATE = 0.0001
-
-TRAIN_RATIO = 0.80
-
-SIGMA = 2.5
-
-# Loss weights
-HEATMAP_WEIGHT = 10.0
-VISIBILITY_WEIGHT = 0.5
-
-RANDOM_SEED = 42
+from src.loss import PoseLoss
 
 
 # ============================================================
-# DEVICE
+# DATALOADER
 # ============================================================
 
-DEVICE = torch.device(
-    "cuda"
-    if torch.cuda.is_available()
-    else "cpu"
-)
-
-
-# ============================================================
-# REPRODUCIBILITY
-# ============================================================
-
-random.seed(RANDOM_SEED)
-np.random.seed(RANDOM_SEED)
-torch.manual_seed(RANDOM_SEED)
-
-if torch.cuda.is_available():
-    torch.cuda.manual_seed_all(RANDOM_SEED)
-
-
-# ============================================================
-# HEATMAP LOSS
-# ============================================================
-
-def heatmap_loss(
-    predicted,
-    target,
-    visibility
+def make_loader(
+    dataset,
+    batch_size,
+    shuffle
 ):
-    """
-    Weighted MSE.
 
-    Visible keypoints receive full weight.
-    Invisible/unlabeled keypoints are ignored.
-    """
-
-    # [B, K, H, W]
-    joint_visibility = visibility.unsqueeze(
-        -1
-    ).unsqueeze(
-        -1
+    return DataLoader(
+        dataset,
+        batch_size=batch_size,
+        shuffle=shuffle,
+        num_workers=NUM_WORKERS,
+        pin_memory=PIN_MEMORY,
+        persistent_workers=(
+            PERSISTENT_WORKERS
+            and NUM_WORKERS > 0
+        ),
+        drop_last=False,
     )
-
-    squared_error = (
-        predicted - target
-    ) ** 2
-
-    # Ignore unlabeled joints
-    weighted_error = (
-        squared_error * joint_visibility
-    )
-
-    denominator = (
-        joint_visibility.sum()
-        * predicted.shape[-1]
-        * predicted.shape[-2]
-    )
-
-    denominator = torch.clamp(
-        denominator,
-        min=1.0
-    )
-
-    return weighted_error.sum() / denominator
 
 
 # ============================================================
-# VISIBILITY LOSS
+# MOVE BATCH
 # ============================================================
 
-visibility_criterion = nn.BCEWithLogitsLoss()
+def move_batch(
+    batch,
+    device
+):
+
+    (
+        images,
+        heatmaps,
+        coords,
+        visibility,
+        visible,
+        meta,
+    ) = batch
+
+    images = images.to(
+        device,
+        non_blocking=True
+    )
+
+    heatmaps = heatmaps.to(
+        device,
+        non_blocking=True
+    )
+
+    coords = coords.to(
+        device,
+        non_blocking=True
+    )
+
+    visibility = visibility.to(
+        device,
+        non_blocking=True
+    )
+
+    visible = visible.to(
+        device,
+        non_blocking=True
+    )
+
+    return (
+        images,
+        heatmaps,
+        coords,
+        visibility,
+        visible,
+        meta
+    )
 
 
 # ============================================================
-# MAIN
+# RUN EPOCH
 # ============================================================
 
-def main():
+def run_epoch(
+    model,
+    loader,
+    criterion,
+    optimizer,
+    scaler,
+    device,
+    training=True
+):
 
-    print("=" * 70)
-    print("COCO HUMAN POSE TRAINING - EXPERIMENT 3")
-    print("=" * 70)
+    if training:
 
-    print("\nDevice:", DEVICE)
+        model.train()
 
-    if DEVICE.type == "cuda":
+    else:
+
+        model.eval()
+
+    totals = {
+        "total": 0.0,
+        "heatmap": 0.0,
+        "coordinate": 0.0,
+        "visibility": 0.0,
+    }
+
+    sample_count = 0
+
+    for batch_idx, batch in enumerate(
+        loader,
+        start=1
+    ):
+
+        (
+            images,
+            target_heatmaps,
+            target_coords,
+            target_visibility,
+            visible,
+            _
+        ) = move_batch(
+            batch,
+            device
+        )
+
+        if training:
+
+            optimizer.zero_grad(
+                set_to_none=True
+            )
+
+        with torch.set_grad_enabled(
+            training
+        ):
+
+            with autocast_context(
+                device
+            ):
+
+                (
+                    pred_heatmaps,
+                    pred_visibility
+                ) = model(images)
+
+                (
+                    loss,
+                    heatmap_loss,
+                    coordinate_loss,
+                    visibility_loss,
+                    _
+                ) = criterion(
+                    pred_heatmaps,
+                    pred_visibility,
+                    target_heatmaps,
+                    target_coords,
+                    target_visibility,
+                    visible,
+                )
+
+            # ------------------------------------------------
+            # BACKPROP
+            # ------------------------------------------------
+
+            if training:
+
+                if scaler is not None:
+
+                    scaler.scale(
+                        loss
+                    ).backward()
+
+                    scaler.unscale_(
+                        optimizer
+                    )
+
+                    torch.nn.utils.clip_grad_norm_(
+                        model.parameters(),
+                        max_norm=5.0
+                    )
+
+                    scaler.step(
+                        optimizer
+                    )
+
+                    scaler.update()
+
+                else:
+
+                    loss.backward()
+
+                    torch.nn.utils.clip_grad_norm_(
+                        model.parameters(),
+                        max_norm=5.0
+                    )
+
+                    optimizer.step()
+
+        # ----------------------------------------------------
+        # METRICS
+        # ----------------------------------------------------
+
+        current_batch_size = (
+            images.size(0)
+        )
+
+        totals["total"] += (
+            loss.detach().item()
+            *
+            current_batch_size
+        )
+
+        totals["heatmap"] += (
+            heatmap_loss.detach().item()
+            *
+            current_batch_size
+        )
+
+        totals["coordinate"] += (
+            coordinate_loss.detach().item()
+            *
+            current_batch_size
+        )
+
+        totals["visibility"] += (
+            visibility_loss.detach().item()
+            *
+            current_batch_size
+        )
+
+        sample_count += current_batch_size
+
+        # ----------------------------------------------------
+        # PROGRESS
+        # ----------------------------------------------------
+
+        if training:
+
+            if (
+                batch_idx == 1
+                or batch_idx % 50 == 0
+                or batch_idx == len(loader)
+            ):
+
+                print(
+                    f"Batch "
+                    f"[{batch_idx}/{len(loader)}] "
+                    f"Total: {loss.item():.5f} | "
+                    f"HM: {heatmap_loss.item():.5f} | "
+                    f"COORD: "
+                    f"{coordinate_loss.item():.5f} | "
+                    f"VIS: "
+                    f"{visibility_loss.item():.5f}"
+                )
+
+    denominator = max(
+        sample_count,
+        1
+    )
+
+    return {
+        key: value / denominator
+        for key, value in totals.items()
+    }
+
+
+# ============================================================
+# CHECKPOINT
+# ============================================================
+
+def save_checkpoint(
+    path,
+    model,
+    optimizer,
+    scheduler,
+    epoch,
+    metrics
+):
+
+    checkpoint = {
+
+        "epoch":
+            epoch,
+
+        "model_state_dict":
+            model.state_dict(),
+
+        "optimizer_state_dict":
+            optimizer.state_dict()
+            if optimizer is not None
+            else None,
+
+        "scheduler_state_dict":
+            scheduler.state_dict()
+            if scheduler is not None
+            else None,
+
+        "metrics":
+            metrics,
+
+        "config": {
+
+            "image_size":
+                IMAGE_SIZE,
+
+            "heatmap_size":
+                HEATMAP_SIZE,
+
+            "num_keypoints":
+                NUM_KEYPOINTS,
+
+            "bbox_scale":
+                BBOX_SCALE,
+
+            "sigma":
+                SIGMA,
+
+            "softargmax_beta":
+                SOFTARGMAX_BETA,
+        }
+    }
+
+    torch.save(
+        checkpoint,
+        path
+    )
+
+
+# ============================================================
+# TRAIN
+# ============================================================
+
+def train():
+
+    seed_everything(
+        SEED
+    )
+
+    ensure_dirs(
+        OUTPUT_DIR,
+        EVAL_DIR
+    )
+
+    device = get_device()
+
+    print("=" * 72)
+    print(
+        "COCO HUMAN POSE TRAINING - "
+        "EXPERIMENT 11"
+    )
+    print("=" * 72)
+
+    print()
+
+    print(
+        "Device:",
+        device
+    )
+
+    if device.type == "cuda":
+
         print(
             "GPU:",
             torch.cuda.get_device_name(0)
         )
-    else:
+
         print(
-            "WARNING: Training on CPU."
+            "GPU memory:",
+            round(
+                torch.cuda.get_device_properties(
+                    0
+                ).total_memory
+                /
+                1024**3,
+                2
+            ),
+            "GB"
         )
 
-    print("\nConfiguration:")
+        print(
+            "AMP: True"
+        )
+
+    else:
+
+        print(
+            "GPU: None"
+        )
+
+        print(
+            "AMP: False"
+        )
+
+    # ========================================================
+    # CONFIG
+    # ========================================================
+
+    print()
+    print("=" * 72)
+    print("CONFIGURATION")
+    print("=" * 72)
+
     print(
-        "Maximum samples:",
+        "Image size:",
+        IMAGE_SIZE
+    )
+
+    print(
+        "Heatmap size:",
+        HEATMAP_SIZE
+    )
+
+    print(
+        "Samples:",
         MAX_SAMPLES
     )
+
     print(
-        "Batch size:",
+        "Batch:",
         BATCH_SIZE
     )
+
     print(
         "Epochs:",
         EPOCHS
     )
+
     print(
         "Learning rate:",
         LEARNING_RATE
     )
+
     print(
-        "Heatmap weight:",
-        HEATMAP_WEIGHT
+        "Weight decay:",
+        WEIGHT_DECAY
     )
+
     print(
-        "Visibility weight:",
-        VISIBILITY_WEIGHT
+        "BBox scale:",
+        BBOX_SCALE
     )
+
     print(
-        "Heatmap sigma:",
+        "Sigma:",
         SIGMA
     )
-    print(
-        "Random seed:",
-        RANDOM_SEED
-    )
-
-    # ========================================================
-    # Checkpoint directory
-    # ========================================================
-
-    os.makedirs(
-        CHECKPOINT_DIR,
-        exist_ok=True
-    )
-
-    # ========================================================
-    # Dataset
-    # ========================================================
-
-    print("\nCreating dataset...")
-
-    dataset = COCOKeypointDataset(
-        image_dir=IMAGE_DIR,
-        annotation_file=ANNOTATION_FILE,
-        image_size=IMAGE_SIZE,
-        heatmap_size=HEATMAP_SIZE,
-        sigma=SIGMA
-    )
 
     print(
-        "Full dataset size:",
-        len(dataset)
+        "Coordinate weight:",
+        COORD_WEIGHT
     )
 
-    if MAX_SAMPLES is not None:
+    # ========================================================
+    # PATH CHECK
+    # ========================================================
 
-        max_samples = min(
-            MAX_SAMPLES,
-            len(dataset)
+    if not os.path.isdir(
+        IMAGE_DIR
+    ):
+
+        raise FileNotFoundError(
+            f"Image directory not found:\n"
+            f"{IMAGE_DIR}"
         )
 
-        dataset = Subset(
-            dataset,
-            range(max_samples)
-        )
+    if not os.path.isfile(
+        ANNOTATION_FILE
+    ):
 
-        print(
-            "Using subset:",
-            len(dataset)
+        raise FileNotFoundError(
+            f"Annotation file not found:\n"
+            f"{ANNOTATION_FILE}"
         )
 
     # ========================================================
-    # Train / validation split
+    # DATA
     # ========================================================
 
-    train_size = int(
-        TRAIN_RATIO * len(dataset)
+    records = load_coco_records(
+        ANNOTATION_FILE,
+        IMAGE_DIR
     )
 
-    val_size = (
-        len(dataset)
-        - train_size
+    train_records, val_records = (
+        split_records(records)
     )
 
-    generator = torch.Generator()
-
-    generator.manual_seed(
-        RANDOM_SEED
+    train_dataset = COCOPoseDataset(
+        train_records,
+        IMAGE_DIR,
+        IMAGE_SIZE,
+        HEATMAP_SIZE,
+        SIGMA,
+        True,
+        BBOX_SCALE
     )
 
-    train_dataset, val_dataset = (
-        random_split(
-            dataset,
-            [train_size, val_size],
-            generator=generator
-        )
+    val_dataset = COCOPoseDataset(
+        val_records,
+        IMAGE_DIR,
+        IMAGE_SIZE,
+        HEATMAP_SIZE,
+        SIGMA,
+        False,
+        BBOX_SCALE
     )
 
-    print(
-        "Training samples:",
-        len(train_dataset)
-    )
-
-    print(
-        "Validation samples:",
-        len(val_dataset)
-    )
-
-    # ========================================================
-    # DataLoader
-    # ========================================================
-
-    train_loader = DataLoader(
+    train_loader = make_loader(
         train_dataset,
-        batch_size=BATCH_SIZE,
-        shuffle=True,
-        num_workers=0
+        BATCH_SIZE,
+        True
     )
 
-    val_loader = DataLoader(
+    val_loader = make_loader(
         val_dataset,
-        batch_size=BATCH_SIZE,
-        shuffle=False,
-        num_workers=0
+        BATCH_SIZE,
+        False
     )
 
+    print()
     print(
         "Training batches:",
         len(train_loader)
@@ -303,318 +560,190 @@ def main():
     )
 
     # ========================================================
-    # Model
+    # MODEL
     # ========================================================
-
-    print("\nCreating model...")
 
     model = UNetPose(
-        in_channels=3,
-        num_keypoints=NUM_KEYPOINTS
+        NUM_KEYPOINTS
+    ).to(device)
+
+    parameters = sum(
+        p.numel()
+        for p in model.parameters()
     )
 
-    model = model.to(DEVICE)
-
+    print()
     print(
-        "Model created successfully."
+        "Model parameters:",
+        f"{parameters:,}"
     )
 
     # ========================================================
-    # Optimizer
+    # LOSS
     # ========================================================
 
-    optimizer = torch.optim.Adam(
+    criterion = PoseLoss(
+        HEATMAP_WEIGHT,
+        COORD_WEIGHT,
+        VIS_WEIGHT,
+        COORD_HUBER_BETA,
+        SOFTARGMAX_BETA
+    )
+
+    # ========================================================
+    # OPTIMIZER
+    # ========================================================
+
+    optimizer = torch.optim.AdamW(
         model.parameters(),
-        lr=LEARNING_RATE
+        lr=LEARNING_RATE,
+        weight_decay=WEIGHT_DECAY
     )
 
     # ========================================================
-    # Learning rate scheduler
+    # SCHEDULER
     # ========================================================
 
-    scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
+    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
         optimizer,
-        mode="min",
-        factor=0.5,
-        patience=3
+        T_max=EPOCHS,
+        eta_min=MIN_LEARNING_RATE
+    )
+
+    scaler = create_scaler(
+        device
     )
 
     # ========================================================
-    # Best validation loss
+    # BEST
     # ========================================================
 
-    best_val_loss = float("inf")
+    best_coordinate_loss = float(
+        "inf"
+    )
+
+    best_epoch = -1
+
+    history = []
 
     # ========================================================
     # TRAINING
     # ========================================================
 
-    print("\nStarting training...")
+    print()
+    print("=" * 72)
+    print("STARTING TRAINING")
+    print("=" * 72)
 
-    print("=" * 70)
+    for epoch in range(
+        1,
+        EPOCHS + 1
+    ):
 
-    for epoch in range(1, EPOCHS + 1):
+        print()
+        print(
+            f"Epoch [{epoch}/{EPOCHS}]"
+        )
 
-        # ====================================================
+        # ----------------------------------------------------
         # TRAIN
-        # ====================================================
+        # ----------------------------------------------------
 
-        model.train()
-
-        running_total = 0.0
-        running_heatmap = 0.0
-        running_visibility = 0.0
-
-        print(
-            f"\nEpoch [{epoch}/{EPOCHS}]"
+        train_metrics = run_epoch(
+            model,
+            train_loader,
+            criterion,
+            optimizer,
+            scaler,
+            device,
+            True
         )
 
-        print("-" * 70)
-
-        for batch_idx, (
-            images,
-            target_heatmaps,
-            visibility
-        ) in enumerate(train_loader):
-
-            images = images.to(DEVICE)
-
-            target_heatmaps = (
-                target_heatmaps.to(DEVICE)
-            )
-
-            visibility = (
-                visibility.to(DEVICE)
-            )
-
-            # ------------------------------------------------
-            # Forward
-            # ------------------------------------------------
-
-            predicted_heatmaps, predicted_visibility = (
-                model(images)
-            )
-
-            # ------------------------------------------------
-            # Losses
-            # ------------------------------------------------
-
-            hm_loss = heatmap_loss(
-                predicted_heatmaps,
-                target_heatmaps,
-                visibility
-            )
-
-            vis_loss = visibility_criterion(
-                predicted_visibility,
-                visibility
-            )
-
-            total_loss = (
-                HEATMAP_WEIGHT * hm_loss
-                +
-                VISIBILITY_WEIGHT * vis_loss
-            )
-
-            # ------------------------------------------------
-            # Backpropagation
-            # ------------------------------------------------
-
-            optimizer.zero_grad()
-
-            total_loss.backward()
-
-            # Gradient clipping
-            torch.nn.utils.clip_grad_norm_(
-                model.parameters(),
-                max_norm=5.0
-            )
-
-            optimizer.step()
-
-            # ------------------------------------------------
-            # Statistics
-            # ------------------------------------------------
-
-            running_total += (
-                total_loss.item()
-            )
-
-            running_heatmap += (
-                hm_loss.item()
-            )
-
-            running_visibility += (
-                vis_loss.item()
-            )
-
-            # ------------------------------------------------
-            # Progress
-            # ------------------------------------------------
-
-            if (
-                batch_idx + 1
-            ) % 50 == 0:
-
-                print(
-                    f"Train Batch "
-                    f"[{batch_idx + 1}/{len(train_loader)}] "
-                    f"Loss: {total_loss.item():.4f} | "
-                    f"Heatmap: {hm_loss.item():.4f} | "
-                    f"Visibility: {vis_loss.item():.4f}"
-                )
-
-        # ====================================================
-        # Average training losses
-        # ====================================================
-
-        train_total = (
-            running_total
-            /
-            len(train_loader)
-        )
-
-        train_heatmap = (
-            running_heatmap
-            /
-            len(train_loader)
-        )
-
-        train_visibility = (
-            running_visibility
-            /
-            len(train_loader)
-        )
-
-        # ====================================================
+        # ----------------------------------------------------
         # VALIDATION
-        # ====================================================
+        # ----------------------------------------------------
 
-        model.eval()
-
-        val_total_sum = 0.0
-        val_heatmap_sum = 0.0
-        val_visibility_sum = 0.0
-
-        with torch.no_grad():
-
-            for images, target_heatmaps, visibility in val_loader:
-
-                images = images.to(DEVICE)
-
-                target_heatmaps = (
-                    target_heatmaps.to(DEVICE)
-                )
-
-                visibility = (
-                    visibility.to(DEVICE)
-                )
-
-                predicted_heatmaps, predicted_visibility = (
-                    model(images)
-                )
-
-                hm_loss = heatmap_loss(
-                    predicted_heatmaps,
-                    target_heatmaps,
-                    visibility
-                )
-
-                vis_loss = visibility_criterion(
-                    predicted_visibility,
-                    visibility
-                )
-
-                total_loss = (
-                    HEATMAP_WEIGHT * hm_loss
-                    +
-                    VISIBILITY_WEIGHT * vis_loss
-                )
-
-                val_total_sum += (
-                    total_loss.item()
-                )
-
-                val_heatmap_sum += (
-                    hm_loss.item()
-                )
-
-                val_visibility_sum += (
-                    vis_loss.item()
-                )
-
-        val_total = (
-            val_total_sum
-            /
-            len(val_loader)
+        val_metrics = run_epoch(
+            model,
+            val_loader,
+            criterion,
+            None,
+            None,
+            device,
+            False
         )
 
-        val_heatmap = (
-            val_heatmap_sum
-            /
-            len(val_loader)
+        current_lr = (
+            optimizer.param_groups[0]["lr"]
         )
 
-        val_visibility = (
-            val_visibility_sum
-            /
-            len(val_loader)
+        history.append(
+            {
+                "epoch":
+                    epoch,
+
+                "train":
+                    train_metrics,
+
+                "val":
+                    val_metrics,
+
+                "lr":
+                    current_lr
+            }
         )
 
-        # ====================================================
-        # Scheduler
-        # ====================================================
-
-        scheduler.step(
-            val_total
-        )
-
-        current_lr = optimizer.param_groups[0]["lr"]
-
-        # ====================================================
+        # ----------------------------------------------------
         # RESULTS
-        # ====================================================
+        # ----------------------------------------------------
 
-        print("\n")
-
-        print("=" * 70)
-
+        print()
+        print("=" * 72)
         print(
-            f"EPOCH {epoch}/{EPOCHS} RESULTS"
+            f"EPOCH {epoch}/{EPOCHS}"
         )
-
-        print("=" * 70)
+        print("=" * 72)
 
         print(
-            f"Training Total Loss: "
-            f"{train_total:.6f}"
+            f"Train total: "
+            f"{train_metrics['total']:.6f}"
         )
 
         print(
-            f"Training Heatmap Loss: "
-            f"{train_heatmap:.6f}"
+            f"Train heatmap: "
+            f"{train_metrics['heatmap']:.6f}"
         )
 
         print(
-            f"Training Visibility BCE: "
-            f"{train_visibility:.6f}"
+            f"Train coordinate: "
+            f"{train_metrics['coordinate']:.6f}"
+        )
+
+        print(
+            f"Train visibility: "
+            f"{train_metrics['visibility']:.6f}"
         )
 
         print()
 
         print(
-            f"Validation Total Loss: "
-            f"{val_total:.6f}"
+            f"Val total: "
+            f"{val_metrics['total']:.6f}"
         )
 
         print(
-            f"Validation Heatmap Loss: "
-            f"{val_heatmap:.6f}"
+            f"Val heatmap: "
+            f"{val_metrics['heatmap']:.6f}"
         )
 
         print(
-            f"Validation Visibility BCE: "
-            f"{val_visibility:.6f}"
+            f"Val coordinate: "
+            f"{val_metrics['coordinate']:.6f}"
+        )
+
+        print(
+            f"Val visibility: "
+            f"{val_metrics['visibility']:.6f}"
         )
 
         print()
@@ -624,102 +753,169 @@ def main():
             f"{current_lr:.8f}"
         )
 
-        # ====================================================
-        # Save best model
-        # ====================================================
+        # ----------------------------------------------------
+        # BEST
+        # ----------------------------------------------------
 
-        if val_total < best_val_loss:
+        if (
+            val_metrics["coordinate"]
+            <
+            best_coordinate_loss
+        ):
 
-            best_val_loss = val_total
+            best_coordinate_loss = (
+                val_metrics["coordinate"]
+            )
 
-            checkpoint = {
-                "epoch": epoch,
-                "model_state_dict": model.state_dict(),
-                "optimizer_state_dict": optimizer.state_dict(),
-                "val_loss": val_total,
-                "train_loss": train_total,
-                "val_heatmap_loss": val_heatmap,
-                "val_visibility_loss": val_visibility,
-            }
+            best_epoch = epoch
 
-            torch.save(
-                checkpoint,
-                BEST_MODEL_PATH
+            best_path = os.path.join(
+                OUTPUT_DIR,
+                "best_unet_pose.pth"
+            )
+
+            save_checkpoint(
+                best_path,
+                model,
+                optimizer,
+                scheduler,
+                epoch,
+                val_metrics
             )
 
             print()
-
             print(
-                "*** NEW BEST MODEL SAVED ***"
+                "*** NEW BEST MODEL ***"
             )
 
             print(
-                "Path:",
-                BEST_MODEL_PATH
+                "Best coordinate loss:",
+                best_coordinate_loss
             )
 
-        else:
+        # ----------------------------------------------------
+        # LATEST
+        # ----------------------------------------------------
+
+        if SAVE_LAST_EVERY_EPOCH:
+
+            latest_path = os.path.join(
+                OUTPUT_DIR,
+                "latest_unet_pose.pth"
+            )
+
+            save_checkpoint(
+                latest_path,
+                model,
+                optimizer,
+                scheduler,
+                epoch,
+                val_metrics
+            )
+
+        # ----------------------------------------------------
+        # SCHEDULER
+        # ----------------------------------------------------
+
+        scheduler.step()
+
+        # ----------------------------------------------------
+        # GPU MEMORY
+        # ----------------------------------------------------
+
+        if device.type == "cuda":
+
+            allocated = (
+                torch.cuda.memory_allocated()
+                /
+                1024**3
+            )
+
+            reserved = (
+                torch.cuda.memory_reserved()
+                /
+                1024**3
+            )
 
             print(
-                "\nNo improvement in validation loss."
+                f"GPU memory: "
+                f"{allocated:.2f} GB allocated | "
+                f"{reserved:.2f} GB reserved"
             )
 
     # ========================================================
-    # Save final model
+    # FINAL
     # ========================================================
 
-    torch.save(
-        {
-            "epoch": EPOCHS,
-            "model_state_dict": model.state_dict(),
-            "optimizer_state_dict": optimizer.state_dict(),
-            "val_loss": val_total,
-            "train_loss": train_total,
-        },
-        FINAL_MODEL_PATH
+    final_path = os.path.join(
+        OUTPUT_DIR,
+        "unet_pose_final.pth"
     )
 
-    # ========================================================
-    # COMPLETE
-    # ========================================================
-
-    print("\n")
-
-    print("=" * 70)
-
-    print(
-        "EXPERIMENT 3 TRAINING COMPLETED"
+    save_checkpoint(
+        final_path,
+        model,
+        optimizer,
+        scheduler,
+        EPOCHS,
+        history[-1]["val"]
     )
 
-    print("=" * 70)
-
-    print(
-        f"\nBest validation loss: "
-        f"{best_val_loss:.6f}"
+    history_path = os.path.join(
+        OUTPUT_DIR,
+        "training_history.json"
     )
 
-    print("\nBest model:")
+    with open(
+        history_path,
+        "w",
+        encoding="utf-8"
+    ) as f:
+
+        json.dump(
+            history,
+            f,
+            indent=2
+        )
+
+    print()
+    print("=" * 72)
+    print(
+        "EXPERIMENT 11 TRAINING COMPLETED"
+    )
+    print("=" * 72)
 
     print(
-        os.path.abspath(
-            BEST_MODEL_PATH
+        "Best coordinate loss:",
+        best_coordinate_loss
+    )
+
+    print(
+        "Best epoch:",
+        best_epoch
+    )
+
+    print(
+        "Best model:",
+        os.path.join(
+            OUTPUT_DIR,
+            "best_unet_pose.pth"
         )
     )
 
-    print("\nFinal model:")
-
     print(
-        os.path.abspath(
-            FINAL_MODEL_PATH
-        )
+        "Final model:",
+        final_path
     )
 
-    print("\n" + "=" * 70)
+    print(
+        "History:",
+        history_path
+    )
 
+    print("=" * 72)
 
-# ============================================================
-# RUN
-# ============================================================
 
 if __name__ == "__main__":
-    main()
+
+    train()

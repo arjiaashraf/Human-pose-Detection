@@ -5,70 +5,86 @@ import torch.nn.functional as F
 
 class SoftArgmax2D(nn.Module):
 
-    def __init__(self, beta=100.0):
+    def __init__(
+        self,
+        beta=50.0
+    ):
+
         super().__init__()
 
         self.beta = beta
 
-    def forward(self, heatmaps):
+    def forward(
+        self,
+        heatmaps
+    ):
 
         B, K, H, W = heatmaps.shape
 
-        # ----------------------------------------------------
-        # Flatten
-        # ----------------------------------------------------
+        # ====================================================
+        # FLATTEN
+        # ====================================================
 
         flat = heatmaps.reshape(
             B,
             K,
-            H * W
+            -1
         )
 
-        # ----------------------------------------------------
-        # Spatial probability
-        # ----------------------------------------------------
+        # ====================================================
+        # SOFTMAX
+        #
+        # Higher beta = sharper distribution.
+        # ====================================================
 
         probabilities = F.softmax(
             flat * self.beta,
             dim=-1
         )
 
-        # ----------------------------------------------------
-        # Coordinate grid
-        # ----------------------------------------------------
+        # ====================================================
+        # COORDINATE GRID
+        # ====================================================
 
-        y_grid, x_grid = torch.meshgrid(
-            torch.arange(
-                H,
-                device=heatmaps.device,
-                dtype=heatmaps.dtype
-            ),
-            torch.arange(
-                W,
-                device=heatmaps.device,
-                dtype=heatmaps.dtype
-            ),
+        y = torch.arange(
+            H,
+            device=heatmaps.device,
+            dtype=heatmaps.dtype
+        )
+
+        x = torch.arange(
+            W,
+            device=heatmaps.device,
+            dtype=heatmaps.dtype
+        )
+
+        yy, xx = torch.meshgrid(
+            y,
+            x,
             indexing="ij"
         )
 
-        x_grid = x_grid.reshape(-1)
-        y_grid = y_grid.reshape(-1)
+        xx = xx.reshape(-1)
+        yy = yy.reshape(-1)
 
-        # ----------------------------------------------------
-        # Expected coordinate
-        # ----------------------------------------------------
+        # ====================================================
+        # EXPECTED COORDINATES
+        # ====================================================
 
-        x = torch.sum(
-            probabilities * x_grid,
+        pred_x = torch.sum(
+            probabilities * xx,
             dim=-1
         )
 
-        y = torch.sum(
-            probabilities * y_grid,
+        pred_y = torch.sum(
+            probabilities * yy,
             dim=-1
         )
 
         return torch.stack(
-            [x, y],
+            [
+                pred_x,
+                pred_y
+            ],
             dim=-1
         )

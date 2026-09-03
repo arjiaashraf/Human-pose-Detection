@@ -1,0 +1,45 @@
+COCO POSE MODEL EVALUATION - EXPERIMENT 9
+===========================================================================
+
+Checkpoint: /content/drive/MyDrive/ai dataset/checkpoints/experiment9/best_unet_pose.pth
+Image size: 256
+Heatmap size: 64
+Sigma: 2.5
+SoftArgmax beta: 50.0
+Training samples: 5562
+Validation samples: 1513
+
+Total evaluated keypoints: 16517
+Mean keypoint error: 10.4536 heatmap pixels
+Mean keypoint error: 41.81 image pixels
+Median keypoint error: 8.5756 heatmap pixels
+90th percentile error: 21.7000 heatmap pixels
+95th percentile error: 26.2818 heatmap pixels
+Visibility accuracy: 70.44%
+
+PCK RESULTS
+---------------------------------------------------------------------------
+PCK @ 0.05: 18.96% (threshold = 3.20 heatmap px / 12.80 image px)
+PCK @ 0.10: 37.89% (threshold = 6.40 heatmap px / 25.60 image px)
+PCK @ 0.15: 54.75% (threshold = 9.60 heatmap px / 38.40 image px)
+PCK @ 0.20: 67.99% (threshold = 12.80 heatmap px / 51.20 image px)
+
+PER-KEYPOINT RESULTS
+---------------------------------------------------------------------------
+ 0 nose             Error(HM): 6.4841 Error(IMG): 25.94 PCK@0.05: 42.80% PCK@0.10: 61.51% PCK@0.15: 76.30% PCK@0.20: 84.13% Count: 1021
+ 1 left_eye         Error(HM): 5.8367 Error(IMG): 23.35 PCK@0.05: 48.55% PCK@0.10: 66.67% PCK@0.15: 79.53% PCK@0.20: 86.13% Count: 894
+ 2 right_eye        Error(HM): 5.7665 Error(IMG): 23.07 PCK@0.05: 49.89% PCK@0.10: 66.74% PCK@0.15: 78.99% PCK@0.20: 86.29% Count: 890
+ 3 left_ear         Error(HM): 6.9098 Error(IMG): 27.64 PCK@0.05: 38.48% PCK@0.10: 58.32% PCK@0.15: 72.30% PCK@0.20: 83.75% Count: 751
+ 4 right_ear        Error(HM): 6.6988 Error(IMG): 26.80 PCK@0.05: 38.60% PCK@0.10: 60.36% PCK@0.15: 75.00% PCK@0.20: 84.72% Count: 772
+ 5 left_shoulder    Error(HM): 10.8549 Error(IMG): 43.42 PCK@0.05: 16.25% PCK@0.10: 36.81% PCK@0.15: 53.89% PCK@0.20: 66.21% Count: 1323
+ 6 right_shoulder   Error(HM): 9.8992 Error(IMG): 39.60 PCK@0.05: 15.65% PCK@0.10: 39.13% PCK@0.15: 57.14% PCK@0.20: 70.97% Count: 1316
+ 7 left_elbow       Error(HM): 13.5115 Error(IMG): 54.05 PCK@0.05: 8.87% PCK@0.10: 25.27% PCK@0.15: 41.95% PCK@0.20: 56.32% Count: 1037
+ 8 right_elbow      Error(HM): 13.5680 Error(IMG): 54.27 PCK@0.05: 5.71% PCK@0.10: 20.77% PCK@0.15: 40.22% PCK@0.20: 55.75% Count: 1069
+ 9 left_wrist       Error(HM): 14.1275 Error(IMG): 56.51 PCK@0.05: 9.40% PCK@0.10: 25.98% PCK@0.15: 38.97% PCK@0.20: 52.06% Count: 947
+10 right_wrist      Error(HM): 14.1548 Error(IMG): 56.62 PCK@0.05: 10.37% PCK@0.10: 23.72% PCK@0.15: 36.04% PCK@0.20: 49.28% Count: 974
+11 left_hip         Error(HM): 11.5699 Error(IMG): 46.28 PCK@0.05: 8.80% PCK@0.10: 27.55% PCK@0.15: 47.27% PCK@0.20: 62.32% Count: 1136
+12 right_hip        Error(HM): 11.1263 Error(IMG): 44.51 PCK@0.05: 6.60% PCK@0.10: 27.12% PCK@0.15: 48.44% PCK@0.20: 68.42% Count: 1121
+13 left_knee        Error(HM): 10.6818 Error(IMG): 42.73 PCK@0.05: 9.30% PCK@0.10: 32.17% PCK@0.15: 50.56% PCK@0.20: 66.59% Count: 892
+14 right_knee       Error(HM): 10.5542 Error(IMG): 42.22 PCK@0.05: 9.79% PCK@0.10: 30.75% PCK@0.15: 52.05% PCK@0.20: 67.77% Count: 878
+15 left_ankle       Error(HM): 11.6107 Error(IMG): 46.44 PCK@0.05: 8.83% PCK@0.10: 27.67% PCK@0.15: 48.09% PCK@0.20: 63.37% Count: 759
+16 right_ankle      Error(HM): 12.2642 Error(IMG): 49.06 PCK@0.05: 7.46% PCK@0.10: 25.78% PCK@0.15: 44.10% PCK@0.20: 59.97% Count: 737

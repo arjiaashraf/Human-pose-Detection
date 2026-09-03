@@ -1,39 +1,30 @@
-# Python
+# Python / Virtual Envs
 __pycache__/
 *.py[cod]
 *.pyo
-
-# Virtual environments
 venv/
 .venv/
 env/
 
-# Model checkpoints
-checkpoints/
-*.pth
-*.pt
-*.ckpt
-
-# Generated outputs
-pose_result.jpg
-*.png
-
-# COCO / datasets
+# Datasets & Large Weights
 data/
 datasets/
 fiftyone/
 coco-2017/
+Takeout/
+yolo11n.pt
 
-# FiftyOne
-.fiftyone/
+# Ignore all checkpoint folders and loose checkpoint directories
+checkpoints/*
+checkpoints_experiment3/
 
-# Jupyter
+# Exception: Allow ONLY experiment11 and its contents
+!checkpoints/experiment11/
+!checkpoints/experiment11/**
+
+# IDE / OS / Jupyter
 .ipynb_checkpoints/
-
-# IDE
 .vscode/
 .idea/
-
-# OS
 .DS_Store
 Thumbs.db

@@ -1,0 +1,14 @@
+COCO POSE MODEL EVALUATION - EXPERIMENT 10
+Checkpoint epoch: 14
+Total evaluated keypoints: 13180
+Mean error HM: 13.357953
+Mean error IMG: 34.812614
+Visibility accuracy: 75.2843%
+PCK@0.05: 19.4234%
+PCK@0.10: 45.1821%
+PCK@0.15: 64.1502%
+PCK@0.20: 76.8968%
+BBox PCK@0.05: 15.4173%
+BBox PCK@0.10: 39.1502%
+BBox PCK@0.15: 57.7845%
+BBox PCK@0.20: 71.6995%

@@ -1,0 +1,28 @@
+COCO POSE MODEL EVALUATION - EXPERIMENT 6
+======================================================================
+
+Checkpoint: /content/drive/MyDrive/ai dataset/checkpoints/experiment6/best_unet_pose.pth
+Total evaluated keypoints: 4285
+Mean keypoint error: 44.8218 heatmap pixels
+PCK @ 0.10: 0.84%
+PCK threshold: 6.40 heatmap pixels
+
+Per-keypoint error:
+----------------------------------------------------------------------
+ 0 nose            37.4105
+ 1 left_eye        37.6339
+ 2 right_eye       35.1659
+ 3 left_ear        38.8778
+ 4 right_ear       34.4050
+ 5 left_shoulder   44.0368
+ 6 right_shoulder  37.3803
+ 7 left_elbow      49.1759
+ 8 right_elbow     42.2515
+ 9 left_wrist      50.1356
+10 right_wrist     44.3893
+11 left_hip        50.0699
+12 right_hip       46.8882
+13 left_knee       53.2193
+14 right_knee      51.0385
+15 left_ankle      58.9043
+16 right_ankle     57.4573

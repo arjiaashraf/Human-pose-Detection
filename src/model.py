@@ -1,40 +1,34 @@
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
+
+from src.config import HEATMAP_SIZE
 
 
-class DoubleConv(nn.Module):
-
-    def __init__(
-        self,
-        in_channels,
-        out_channels
-    ):
+class ConvBNAct(nn.Module):
+    def __init__(self, in_ch, out_ch, stride=1):
         super().__init__()
 
         self.block = nn.Sequential(
-
             nn.Conv2d(
-                in_channels,
-                out_channels,
+                in_ch,
+                out_ch,
                 kernel_size=3,
+                stride=stride,
                 padding=1,
                 bias=False
             ),
-
-            nn.BatchNorm2d(out_channels),
-
+            nn.BatchNorm2d(out_ch),
             nn.ReLU(inplace=True),
 
             nn.Conv2d(
-                out_channels,
-                out_channels,
+                out_ch,
+                out_ch,
                 kernel_size=3,
                 padding=1,
                 bias=False
             ),
-
-            nn.BatchNorm2d(out_channels),
-
+            nn.BatchNorm2d(out_ch),
             nn.ReLU(inplace=True)
         )
 
@@ -42,90 +36,150 @@ class DoubleConv(nn.Module):
         return self.block(x)
 
 
-class UNetPose(nn.Module):
-
-    def __init__(
-        self,
-        in_channels=3,
-        num_keypoints=17
-    ):
+class UpBlock(nn.Module):
+    def __init__(self, in_ch, skip_ch, out_ch):
         super().__init__()
 
-        # ----------------------------------------------------
-        # Encoder
-        # ----------------------------------------------------
+        self.conv = ConvBNAct(
+            in_ch + skip_ch,
+            out_ch
+        )
 
-        self.enc1 = DoubleConv(
-            in_channels,
+    def forward(self, x, skip):
+        x = F.interpolate(
+            x,
+            size=skip.shape[-2:],
+            mode="bilinear",
+            align_corners=False
+        )
+
+        x = torch.cat([x, skip], dim=1)
+
+        return self.conv(x)
+
+
+class UNetPose(nn.Module):
+
+    def __init__(self, num_keypoints=17):
+        super().__init__()
+
+        # ============================================================
+        # ENCODER
+        # ============================================================
+
+        self.enc1 = ConvBNAct(
+            3,
             32
         )
 
-        self.enc2 = DoubleConv(
+        self.enc2 = ConvBNAct(
             32,
-            64
-        )
-
-        self.enc3 = DoubleConv(
             64,
-            128
+            stride=2
         )
 
-        self.enc4 = DoubleConv(
+        self.enc3 = ConvBNAct(
+            64,
             128,
-            256
+            stride=2
         )
 
-        self.pool = nn.MaxPool2d(
-            2,
-            2
+        self.enc4 = ConvBNAct(
+            128,
+            256,
+            stride=2
         )
 
-        # ----------------------------------------------------
-        # Bottleneck
-        # ----------------------------------------------------
+        # 48 -> 24
+        self.bottleneck = ConvBNAct(
+            256,
+            256,
+            stride=2
+        )
 
-        self.bottleneck = DoubleConv(
+        # ============================================================
+        # DECODER
+        # ============================================================
+
+        # 24 -> 48
+        self.up4 = UpBlock(
+            256,
             256,
             256
         )
 
-        # ----------------------------------------------------
-        # Decoder
-        # ----------------------------------------------------
-
-        self.up4 = nn.ConvTranspose2d(
+        # 48 -> 96
+        self.up3 = UpBlock(
             256,
             128,
-            kernel_size=2,
-            stride=2
-        )
-
-        self.dec4 = DoubleConv(
-            384,
             128
         )
 
-        self.up3 = nn.ConvTranspose2d(
+        # 96 -> 192
+        self.up2 = UpBlock(
             128,
             64,
-            kernel_size=2,
-            stride=2
-        )
-
-        self.dec3 = DoubleConv(
-            192,
             64
         )
 
-        # ----------------------------------------------------
-        # Heads
-        # ----------------------------------------------------
+        # 192 -> 384
+        self.up1 = UpBlock(
+            64,
+            32,
+            32
+        )
+
+        # ============================================================
+        # HEATMAP FEATURES
+        #
+        # d1 is 384x384.
+        # We need 96x96 output.
+        #
+        # 384 -> 192 -> 96
+        # ============================================================
+
+        self.final_down = nn.Sequential(
+
+            # 384 -> 192
+            nn.Conv2d(
+                32,
+                64,
+                kernel_size=3,
+                stride=2,
+                padding=1,
+                bias=False
+            ),
+            nn.BatchNorm2d(64),
+            nn.ReLU(inplace=True),
+
+            # 192 -> 96
+            nn.Conv2d(
+                64,
+                64,
+                kernel_size=3,
+                stride=2,
+                padding=1,
+                bias=False
+            ),
+            nn.BatchNorm2d(64),
+            nn.ReLU(inplace=True)
+        )
+
+        # ============================================================
+        # HEATMAP HEAD
+        # ============================================================
 
         self.heatmap_head = nn.Conv2d(
             64,
             num_keypoints,
             kernel_size=1
         )
+
+        # ============================================================
+        # VISIBILITY HEAD
+        #
+        # Uses bottleneck features: 256 channels
+        # ============================================================
 
         self.visibility_head = nn.Sequential(
 
@@ -134,84 +188,164 @@ class UNetPose(nn.Module):
             nn.Flatten(),
 
             nn.Linear(
-                64,
-                32
+                256,
+                128
             ),
 
             nn.ReLU(inplace=True),
 
+            nn.Dropout(0.15),
+
             nn.Linear(
-                32,
+                128,
                 num_keypoints
             )
         )
 
-        # ----------------------------------------------------
-        # Initialize heatmap head
-        # ----------------------------------------------------
-
-        nn.init.normal_(
-            self.heatmap_head.weight,
-            mean=0.0,
-            std=0.001
-        )
-
-        nn.init.constant_(
-            self.heatmap_head.bias,
-            -2.0
-        )
-
     def forward(self, x):
 
-        # Encoder
+        # ============================================================
+        # ENCODER
+        # ============================================================
 
         e1 = self.enc1(x)
+        # [B, 32, 384, 384]
 
-        e2 = self.enc2(
-            self.pool(e1)
+        e2 = self.enc2(e1)
+        # [B, 64, 192, 192]
+
+        e3 = self.enc3(e2)
+        # [B, 128, 96, 96]
+
+        e4 = self.enc4(e3)
+        # [B, 256, 48, 48]
+
+        b = self.bottleneck(e4)
+        # [B, 256, 24, 24]
+
+        # ============================================================
+        # DECODER
+        # ============================================================
+
+        d4 = self.up4(b, e4)
+        # [B, 256, 48, 48]
+
+        d3 = self.up3(d4, e3)
+        # [B, 128, 96, 96]
+
+        d2 = self.up2(d3, e2)
+        # [B, 64, 192, 192]
+
+        d1 = self.up1(d2, e1)
+        # [B, 32, 384, 384]
+
+        # ============================================================
+        # HEATMAP FEATURES
+        # ============================================================
+
+        features = self.final_down(d1)
+        # [B, 64, 96, 96]
+
+        heatmaps = self.heatmap_head(features)
+        # [B, 17, 96, 96]
+
+        # ============================================================
+        # SAFETY CHECK
+        #
+        # Guarantees the output exactly matches config.
+        # ============================================================
+
+        if heatmaps.shape[-2:] != (
+            HEATMAP_SIZE,
+            HEATMAP_SIZE
+        ):
+
+            heatmaps = F.interpolate(
+                heatmaps,
+                size=(
+                    HEATMAP_SIZE,
+                    HEATMAP_SIZE
+                ),
+                mode="bilinear",
+                align_corners=False
+            )
+
+        # ============================================================
+        # VISIBILITY
+        # ============================================================
+
+        visibility = self.visibility_head(b)
+        # [B, 17]
+
+        return heatmaps, visibility
+
+
+class SoftArgmax2D(nn.Module):
+
+    def __init__(self, beta=50.0):
+        super().__init__()
+
+        self.beta = beta
+
+    def forward(self, heatmaps):
+
+        b, k, h, w = heatmaps.shape
+
+        # Flatten spatial dimensions
+        flat = heatmaps.reshape(
+            b,
+            k,
+            -1
         )
 
-        e3 = self.enc3(
-            self.pool(e2)
+        # Convert heatmaps into probability distributions
+        probs = F.softmax(
+            flat * self.beta,
+            dim=-1
         )
 
-        e4 = self.enc4(
-            self.pool(e3)
+        # Normalized coordinates [0, 1]
+        ys = torch.linspace(
+            0.0,
+            1.0,
+            h,
+            device=heatmaps.device,
+            dtype=heatmaps.dtype
         )
 
-        # Bottleneck
-
-        b = self.bottleneck(
-            self.pool(e4)
+        xs = torch.linspace(
+            0.0,
+            1.0,
+            w,
+            device=heatmaps.device,
+            dtype=heatmaps.dtype
         )
 
-        # Decoder
-
-        d4 = self.up4(b)
-
-        d4 = torch.cat(
-            [d4, e4],
-            dim=1
+        yy, xx = torch.meshgrid(
+            ys,
+            xs,
+            indexing="ij"
         )
 
-        d4 = self.dec4(d4)
-
-        d3 = self.up3(d4)
-
-        d3 = torch.cat(
-            [d3, e3],
-            dim=1
+        xx = xx.reshape(
+            1,
+            1,
+            -1
         )
 
-        d3 = self.dec3(d3)
-
-        # Outputs
-
-        heatmaps = self.heatmap_head(d3)
-
-        visibility = self.visibility_head(d3)
-
-        return (
-            heatmaps,
-            visibility
+        yy = yy.reshape(
+            1,
+            1,
+            -1
         )
+
+        x = (probs * xx).sum(-1)
+
+        y = (probs * yy).sum(-1)
+
+        coords = torch.stack(
+            [x, y],
+            dim=-1
+        )
+
+        return coords

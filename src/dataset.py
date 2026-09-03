@@ -1,285 +1,741 @@
-import json
 import os
+import json
+import random
 
-import cv2
 import numpy as np
+
+from PIL import Image, ImageEnhance
+
 import torch
+
 from torch.utils.data import Dataset
 
+from src.config import (
+    NUM_KEYPOINTS,
+    MIN_VISIBLE_KEYPOINTS,
+    MAX_SAMPLES,
+    TRAIN_RATIO,
+    SEED,
+    HORIZONTAL_FLIP_PROB,
+    COLOR_JITTER_PROB,
+    BRIGHTNESS_RANGE,
+    CONTRAST_RANGE,
+    SATURATION_RANGE,
+    HUE_RANGE,
+    FLIP_PAIRS,
+)
 
-class COCOKeypointDataset(Dataset):
+from src.utils import (
+    xywh_to_xyxy,
+    make_square_bbox,
+    gaussian_heatmap,
+)
+
+
+class COCOPoseDataset(Dataset):
 
     def __init__(
         self,
+        records,
         image_dir,
-        annotation_file,
-        image_size=256,
-        heatmap_size=64,
+        image_size=384,
+        heatmap_size=96,
         sigma=2.5,
-        padding=0.20,
+        train=False,
+        bbox_scale=1.20,
     ):
+
+        self.records = records
+
         self.image_dir = image_dir
+
         self.image_size = image_size
+
         self.heatmap_size = heatmap_size
+
         self.sigma = sigma
-        self.padding = padding
 
-        with open(annotation_file, "r", encoding="utf-8") as f:
-            coco = json.load(f)
+        self.train = train
 
-        self.images = {
-            img["id"]: img
-            for img in coco["images"]
-        }
-
-        self.annotations = []
-
-        for ann in coco["annotations"]:
-
-            if ann.get("category_id") != 1:
-                continue
-
-            if ann.get("num_keypoints", 0) <= 0:
-                continue
-
-            image_id = ann["image_id"]
-
-            if image_id not in self.images:
-                continue
-
-            image_info = self.images[image_id]
-
-            image_path = os.path.join(
-                self.image_dir,
-                image_info["file_name"]
-            )
-
-            if os.path.exists(image_path):
-                self.annotations.append(ann)
-
-        print(
-            "Usable person annotations:",
-            len(self.annotations)
-        )
+        self.bbox_scale = bbox_scale
 
     def __len__(self):
-        return len(self.annotations)
+
+        return len(self.records)
+
+    # ========================================================
+    # COLOR AUGMENTATION
+    # ========================================================
+
+    def apply_color_augmentation(self, image):
+
+        if random.random() > COLOR_JITTER_PROB:
+
+            return image
+
+        brightness = random.uniform(
+            1.0 - BRIGHTNESS_RANGE,
+            1.0 + BRIGHTNESS_RANGE
+        )
+
+        contrast = random.uniform(
+            1.0 - CONTRAST_RANGE,
+            1.0 + CONTRAST_RANGE
+        )
+
+        saturation = random.uniform(
+            1.0 - SATURATION_RANGE,
+            1.0 + SATURATION_RANGE
+        )
+
+        image = ImageEnhance.Brightness(
+            image
+        ).enhance(brightness)
+
+        image = ImageEnhance.Contrast(
+            image
+        ).enhance(contrast)
+
+        image = ImageEnhance.Color(
+            image
+        ).enhance(saturation)
+
+        return image
+
+    # ========================================================
+    # GET ITEM
+    # ========================================================
 
     def __getitem__(self, idx):
 
-        ann = self.annotations[idx]
-
-        image_info = self.images[
-            ann["image_id"]
-        ]
+        rec = self.records[idx]
 
         image_path = os.path.join(
             self.image_dir,
-            image_info["file_name"]
+            rec["file_name"]
         )
 
-        image = cv2.imread(image_path)
+        try:
 
-        if image is None:
-            raise FileNotFoundError(
-                f"Could not load image:\n{image_path}"
-            )
+            image = Image.open(
+                image_path
+            ).convert("RGB")
 
-        image = cv2.cvtColor(
-            image,
-            cv2.COLOR_BGR2RGB
-        )
+        except Exception as e:
 
-        original_h, original_w = image.shape[:2]
-
-        # ----------------------------------------------------
-        # Bounding box
-        # ----------------------------------------------------
-
-        x, y, w, h = ann["bbox"]
-
-        x1 = float(x)
-        y1 = float(y)
-        x2 = float(x + w)
-        y2 = float(y + h)
-
-        # Padding
-        pad_x = w * self.padding
-        pad_y = h * self.padding
-
-        x1 -= pad_x
-        y1 -= pad_y
-        x2 += pad_x
-        y2 += pad_y
-
-        # Clamp
-        x1 = max(0.0, x1)
-        y1 = max(0.0, y1)
-
-        x2 = min(float(original_w), x2)
-        y2 = min(float(original_h), y2)
-
-        # Ensure valid crop
-        x1_int = int(np.floor(x1))
-        y1_int = int(np.floor(y1))
-        x2_int = int(np.ceil(x2))
-        y2_int = int(np.ceil(y2))
-
-        x2_int = max(x2_int, x1_int + 1)
-        y2_int = max(y2_int, y1_int + 1)
-
-        crop = image[
-            y1_int:y2_int,
-            x1_int:x2_int
-        ]
-
-        if crop.size == 0:
             raise RuntimeError(
-                f"Empty crop for annotation {idx}"
+                f"Could not open image: "
+                f"{image_path}\nError: {e}"
             )
 
-        crop_h, crop_w = crop.shape[:2]
+        image_w, image_h = image.size
 
-        # ----------------------------------------------------
-        # Keypoints
-        # ----------------------------------------------------
-
-        keypoints = np.array(
-            ann["keypoints"],
+        kps = np.array(
+            rec["keypoints"],
             dtype=np.float32
-        ).reshape(17, 3)
+        ).reshape(
+            NUM_KEYPOINTS,
+            3
+        )
 
-        # Convert original image coordinates
-        # into crop coordinates
-
-        keypoints[:, 0] -= x1_int
-        keypoints[:, 1] -= y1_int
+        original_kps = kps.copy()
 
         # ----------------------------------------------------
-        # Resize image to 256x256
+        # ORIGINAL BBOX
         # ----------------------------------------------------
 
-        crop = cv2.resize(
-            crop,
+        bx1, by1, bx2, by2 = xywh_to_xyxy(
+            rec["bbox"]
+        )
+
+        bx1 = max(
+            0.0,
+            min(
+                bx1,
+                image_w - 1
+            )
+        )
+
+        by1 = max(
+            0.0,
+            min(
+                by1,
+                image_h - 1
+            )
+        )
+
+        bx2 = max(
+            bx1 + 1.0,
+            min(
+                bx2,
+                float(image_w)
+            )
+        )
+
+        by2 = max(
+            by1 + 1.0,
+            min(
+                by2,
+                float(image_h)
+            )
+        )
+
+        # ----------------------------------------------------
+        # PERSON CROP
+        # ----------------------------------------------------
+
+        cx1, cy1, cx2, cy2 = make_square_bbox(
+            (
+                bx1,
+                by1,
+                bx2,
+                by2
+            ),
+            image_w,
+            image_h,
+            self.bbox_scale
+        )
+
+        actual_x1 = int(
+            round(cx1)
+        )
+
+        actual_y1 = int(
+            round(cy1)
+        )
+
+        actual_x2 = int(
+            round(cx2)
+        )
+
+        actual_y2 = int(
+            round(cy2)
+        )
+
+        crop = image.crop(
+            (
+                actual_x1,
+                actual_y1,
+                actual_x2,
+                actual_y2
+            )
+        )
+
+        crop_w = max(
+            actual_x2 - actual_x1,
+            1
+        )
+
+        crop_h = max(
+            actual_y2 - actual_y1,
+            1
+        )
+
+        # ----------------------------------------------------
+        # KEYPOINTS INTO CROP COORDINATES
+        # ----------------------------------------------------
+
+        kp = kps.copy()
+
+        kp[:, 0] -= actual_x1
+        kp[:, 1] -= actual_y1
+
+        flipped = False
+
+        # ----------------------------------------------------
+        # HORIZONTAL FLIP
+        # ----------------------------------------------------
+
+        if (
+            self.train
+            and random.random()
+            < HORIZONTAL_FLIP_PROB
+        ):
+
+            crop = crop.transpose(
+                Image.Transpose.FLIP_LEFT_RIGHT
+            )
+
+            kp[:, 0] = (
+                crop_w - 1
+                - kp[:, 0]
+            )
+
+            for a, b in FLIP_PAIRS:
+
+                kp[[a, b]] = kp[[b, a]]
+
+            flipped = True
+
+        # ----------------------------------------------------
+        # COLOR AUGMENTATION
+        # ----------------------------------------------------
+
+        if self.train:
+
+            crop = self.apply_color_augmentation(
+                crop
+            )
+
+        # ----------------------------------------------------
+        # RESIZE
+        # ----------------------------------------------------
+
+        crop = crop.resize(
             (
                 self.image_size,
                 self.image_size
             ),
-            interpolation=cv2.INTER_LINEAR
+            Image.Resampling.BILINEAR
         )
-
-        scale_x = (
-            self.image_size / float(crop_w)
-        )
-
-        scale_y = (
-            self.image_size / float(crop_h)
-        )
-
-        keypoints[:, 0] *= scale_x
-        keypoints[:, 1] *= scale_y
 
         # ----------------------------------------------------
-        # Image tensor
+        # IMAGE TENSOR
         # ----------------------------------------------------
 
-        crop = crop.astype(
-            np.float32
+        image_array = np.asarray(
+            crop,
+            dtype=np.float32
         ) / 255.0
 
-        crop = np.transpose(
-            crop,
-            (2, 0, 1)
-        )
-
         image_tensor = torch.from_numpy(
-            crop
-        ).float()
-
-        # ----------------------------------------------------
-        # Heatmaps
-        # ----------------------------------------------------
-
-        heatmaps = self.generate_heatmaps(
-            keypoints
+            image_array
+        ).permute(
+            2,
+            0,
+            1
         )
 
-        # ----------------------------------------------------
-        # Visibility
-        # ----------------------------------------------------
+        mean = torch.tensor(
+            [0.485, 0.456, 0.406]
+        ).view(
+            3,
+            1,
+            1
+        )
 
-        visibility = (
-            keypoints[:, 2] > 0
-        ).astype(np.float32)
+        std = torch.tensor(
+            [0.229, 0.224, 0.225]
+        ).view(
+            3,
+            1,
+            1
+        )
+
+        image_tensor = (
+            image_tensor - mean
+        ) / std
+
+        # ----------------------------------------------------
+        # VISIBILITY
+        # ----------------------------------------------------
 
         visibility = torch.from_numpy(
-            visibility
-        ).float()
+            (
+                kp[:, 2] > 0
+            ).astype(
+                np.float32
+            )
+        )
+
+        visible = torch.from_numpy(
+            (
+                kp[:, 2] == 2
+            ).astype(
+                np.float32
+            )
+        )
+
+        # ----------------------------------------------------
+        # NORMALIZED COORDINATES
+        # ----------------------------------------------------
+
+        norm_x = kp[:, 0] / float(crop_w)
+
+        norm_y = kp[:, 1] / float(crop_h)
+
+        # ----------------------------------------------------
+        # CLAMP COORDINATES
+        # ----------------------------------------------------
+
+        norm_x = np.clip(
+            norm_x,
+            0.0,
+            1.0
+        )
+
+        norm_y = np.clip(
+            norm_y,
+            0.0,
+            1.0
+        )
+
+        # ----------------------------------------------------
+        # HEATMAP COORDINATES
+        # ----------------------------------------------------
+
+        heat_x = (
+            norm_x
+            *
+            (self.heatmap_size - 1)
+        )
+
+        heat_y = (
+            norm_y
+            *
+            (self.heatmap_size - 1)
+        )
+
+        # ----------------------------------------------------
+        # HEATMAPS
+        # ----------------------------------------------------
+
+        heatmaps = torch.zeros(
+            self.heatmap_size,
+            self.heatmap_size,
+            NUM_KEYPOINTS,
+            dtype=torch.float32
+        )
+
+        for j in range(NUM_KEYPOINTS):
+
+            if visibility[j].item() > 0:
+
+                heatmaps[
+                    :,
+                    :,
+                    j
+                ] = gaussian_heatmap(
+                    float(heat_x[j]),
+                    float(heat_y[j]),
+                    self.heatmap_size,
+                    self.sigma
+                )
+
+        heatmaps = heatmaps.permute(
+            2,
+            0,
+            1
+        ).contiguous()
+
+        # ----------------------------------------------------
+        # COORDINATES
+        # ----------------------------------------------------
+
+        coords = torch.from_numpy(
+            np.stack(
+                [
+                    norm_x,
+                    norm_y
+                ],
+                axis=1
+            ).astype(
+                np.float32
+            )
+        )
+
+        # ----------------------------------------------------
+        # METADATA
+        # ----------------------------------------------------
+
+        meta = {
+
+            "image_id":
+                int(rec["image_id"]),
+
+            "file_name":
+                rec["file_name"],
+
+            "orig_w":
+                int(image_w),
+
+            "orig_h":
+                int(image_h),
+
+            "crop_x1":
+                int(actual_x1),
+
+            "crop_y1":
+                int(actual_y1),
+
+            "crop_w":
+                int(crop_w),
+
+            "crop_h":
+                int(crop_h),
+
+            "bbox_w":
+                float(
+                    max(
+                        bx2 - bx1,
+                        1.0
+                    )
+                ),
+
+            "bbox_h":
+                float(
+                    max(
+                        by2 - by1,
+                        1.0
+                    )
+                ),
+
+            "original_keypoints":
+                original_kps.astype(
+                    np.float32
+                ),
+
+            "flipped":
+                flipped,
+        }
 
         return (
             image_tensor,
             heatmaps,
-            visibility
+            coords,
+            visibility,
+            visible,
+            meta
         )
 
-    # ========================================================
-    # Gaussian heatmaps
-    # ========================================================
 
-    def generate_heatmaps(self, keypoints):
+# ============================================================
+# LOAD COCO
+# ============================================================
 
-        H = self.heatmap_size
-        W = self.heatmap_size
+def load_coco_records(
+    annotation_file,
+    image_dir
+):
 
-        heatmaps = np.zeros(
-            (17, H, W),
-            dtype=np.float32
+    print("=" * 72)
+    print("CREATING DATASET")
+    print("=" * 72)
+
+    if not os.path.isdir(image_dir):
+
+        raise FileNotFoundError(
+            f"Image directory does not exist:\n"
+            f"{image_dir}"
         )
 
-        scale = (
-            H / float(self.image_size)
+    if not os.path.isfile(annotation_file):
+
+        raise FileNotFoundError(
+            f"Annotation file does not exist:\n"
+            f"{annotation_file}"
         )
 
-        xx, yy = np.meshgrid(
-            np.arange(W, dtype=np.float32),
-            np.arange(H, dtype=np.float32)
+    with open(
+        annotation_file,
+        "r",
+        encoding="utf-8"
+    ) as f:
+
+        coco = json.load(f)
+
+    images = {
+        int(img["id"]): img
+        for img in coco.get(
+            "images",
+            []
+        )
+    }
+
+    records = []
+
+    for ann in coco.get(
+        "annotations",
+        []
+    ):
+
+        if ann.get(
+            "category_id"
+        ) != 1:
+
+            continue
+
+        kps = ann.get(
+            "keypoints"
         )
 
-        for joint_id in range(17):
+        if (
+            not kps
+            or len(kps) != 51
+        ):
 
-            x, y, visibility = (
-                keypoints[joint_id]
+            continue
+
+        visible_count = sum(
+            1
+            for i in range(17)
+            if kps[i * 3 + 2] == 2
+        )
+
+        labeled_count = sum(
+            1
+            for i in range(17)
+            if kps[i * 3 + 2] > 0
+        )
+
+        if (
+            visible_count
+            < MIN_VISIBLE_KEYPOINTS
+        ):
+
+            continue
+
+        if (
+            labeled_count
+            < MIN_VISIBLE_KEYPOINTS
+        ):
+
+            continue
+
+        bbox = ann.get(
+            "bbox"
+        )
+
+        if (
+            not bbox
+            or bbox[2] <= 2
+            or bbox[3] <= 2
+        ):
+
+            continue
+
+        image_info = images.get(
+            int(
+                ann["image_id"]
             )
+        )
 
-            if visibility <= 0:
-                continue
+        if image_info is None:
 
-            hx = x * scale
-            hy = y * scale
+            continue
 
-            # Ignore points far outside target
-            if (
-                hx < -3 * self.sigma
-                or hx > W + 3 * self.sigma
-                or hy < -3 * self.sigma
-                or hy > H + 3 * self.sigma
-            ):
-                continue
+        file_name = image_info[
+            "file_name"
+        ]
 
-            exponent = (
-                (
-                    (xx - hx) ** 2
-                    +
-                    (yy - hy) ** 2
-                )
-                /
-                (2.0 * self.sigma ** 2)
-            )
+        image_path = os.path.join(
+            image_dir,
+            file_name
+        )
 
-            heatmaps[joint_id] = np.exp(
-                -exponent
-            )
+        if not os.path.isfile(
+            image_path
+        ):
 
-        return torch.from_numpy(
-            heatmaps
-        ).float()
+            continue
+
+        records.append(
+            {
+                "image_id":
+                    int(
+                        ann["image_id"]
+                    ),
+
+                "file_name":
+                    file_name,
+
+                "bbox":
+                    [
+                        float(x)
+                        for x in bbox
+                    ],
+
+                "keypoints":
+                    [
+                        float(x)
+                        for x in kps
+                    ],
+            }
+        )
+
+    print(
+        "Usable person annotations:",
+        len(records)
+    )
+
+    if MAX_SAMPLES is not None:
+
+        records = records[
+            :MAX_SAMPLES
+        ]
+
+        print(
+            "Using maximum samples:",
+            MAX_SAMPLES
+        )
+
+    print(
+        "Full dataset size:",
+        len(records)
+    )
+
+    print()
+
+    if len(records) < 10:
+
+        raise RuntimeError(
+            "Too few usable annotations."
+        )
+
+    return records
+
+
+# ============================================================
+# TRAIN / VALIDATION SPLIT
+# ============================================================
+
+def split_records(records):
+
+    rng = random.Random(
+        SEED
+    )
+
+    indices = list(
+        range(
+            len(records)
+        )
+    )
+
+    rng.shuffle(
+        indices
+    )
+
+    train_count = int(
+        len(indices)
+        *
+        TRAIN_RATIO
+    )
+
+    train_records = [
+        records[i]
+        for i in indices[
+            :train_count
+        ]
+    ]
+
+    val_records = [
+        records[i]
+        for i in indices[
+            train_count:
+        ]
+    ]
+
+    print(
+        "Training samples:",
+        len(train_records)
+    )
+
+    print(
+        "Validation samples:",
+        len(val_records)
+    )
+
+    return (
+        train_records,
+        val_records
+    )

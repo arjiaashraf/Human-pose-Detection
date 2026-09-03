@@ -1,0 +1,40 @@
+COCO POSE MODEL EVALUATION - EXPERIMENT 9
+======================================================================
+
+Checkpoint: /content/drive/MyDrive/ai dataset/checkpoints/experiment8/best_unet_pose.pth
+Image size: 256
+Heatmap size: 64
+SoftArgmax beta: 100.0
+Sigma: 2.5
+Maximum samples: 2000
+Validation samples: 400
+
+Total evaluated keypoints: 4285
+Mean keypoint error: 16.0987 heatmap pixels
+PCK @ 0.10: 7.72%
+PCK threshold: 6.40 heatmap pixels
+
+Per-keypoint results:
+----------------------------------------------------------------------
+ 0 nose            Error:  15.2047 PCK:    6.98% Count: 258
+ 1 left_eye        Error:  15.4462 PCK:    5.05% Count: 218
+ 2 right_eye       Error:  15.4279 PCK:    3.86% Count: 233
+ 3 left_ear        Error:  15.9678 PCK:    5.00% Count: 200
+ 4 right_ear       Error:  15.4750 PCK:    2.36% Count: 212
+ 5 left_shoulder   Error:  15.8794 PCK:    4.86% Count: 350
+ 6 right_shoulder  Error:  15.2526 PCK:    3.10% Count: 355
+ 7 left_elbow      Error:  17.0698 PCK:    6.84% Count: 263
+ 8 right_elbow     Error:  16.4090 PCK:    8.39% Count: 286
+ 9 left_wrist      Error:  16.3344 PCK:   10.33% Count: 242
+10 right_wrist     Error:  15.6598 PCK:   12.31% Count: 260
+11 left_hip        Error:  13.2902 PCK:   22.11% Count: 285
+12 right_hip       Error:  13.4291 PCK:   20.68% Count: 295
+13 left_knee       Error:  16.0475 PCK:    5.33% Count: 225
+14 right_knee      Error:  15.6788 PCK:    6.28% Count: 223
+15 left_ankle      Error:  23.0654 PCK:    0.52% Count: 191
+16 right_ankle     Error:  22.1307 PCK:    0.00% Count: 189
+
+Additional statistics:
+Median keypoint error: 15.6272
+90th percentile error: 24.9098
+95th percentile error: 28.4555
